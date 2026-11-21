@@ -87,9 +87,99 @@ fn target() -> KubernetesTarget {
         server: "https://cluster.example".into(),
         namespace: "test".into(),
         ca_file: None,
+        previous_ca_file: None,
         token_file: None,
         allow_http_loopback: false,
     }
+}
+
+#[test]
+fn credential_rotation_invalidates_prepared_changes_before_mutation() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let token = temp.path().join("token");
+    std::fs::write(&token, "first-test-token")?;
+    std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600))?;
+    let mut target = target();
+    target.token_file = Some(token.clone());
+    let mut k = Kubernetes {
+        api: FakeApi::default(),
+        target,
+    };
+    let c = context(temp.path().into())?;
+    let observed = k.observe(&c)?;
+    let plan = k.prepare_change(&c, &observed, "before-rotation")?;
+    std::fs::write(&token, "second-test-token")?;
+    assert!(k.execute_change(&c, &plan).is_err());
+    assert_eq!(k.api.writes, 0);
+    Ok(())
+}
+
+#[test]
+fn connected_transport_refuses_public_target_and_credential_changes() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let token = temp.path().join("token");
+    std::fs::write(&token, "first-test-token")?;
+    std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600))?;
+    let mut config = target();
+    config.token_file = Some(token.clone());
+    let mut k = Kubernetes::connect(config)?;
+    let c = context(temp.path().into())?;
+    k.target.server = "https://different.example".into();
+    assert!(k
+        .observe(&c)
+        .unwrap_err()
+        .to_string()
+        .contains("target changed"));
+    assert!(k
+        .prepare_change(&c, &Observation::default(), "changed-target")
+        .unwrap_err()
+        .to_string()
+        .contains("target changed"));
+    k.target.server = "https://cluster.example".into();
+    k.target.namespace = "different".into();
+    assert!(k.fingerprint().is_err());
+    k.target.namespace = "test".into();
+    std::fs::write(&token, "second-test-token")?;
+    assert!(k.fingerprint().is_err());
+    Ok(())
+}
+
+#[test]
+fn token_rotation_invalidates_update_and_removal_plans() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let token = temp.path().join("token");
+    std::fs::write(&token, "first-test-token")?;
+    std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600))?;
+    let mut target = target();
+    target.token_file = Some(token.clone());
+    let mut k = Kubernetes {
+        api: FakeApi::default(),
+        target,
+    };
+    let mut c = context(temp.path().into())?;
+    let observed = k.observe(&c)?;
+    let create = k.prepare_change(&c, &observed, "create")?;
+    c.inventory = k.execute_change(&c, &create)?.inventory;
+    c.artifact["items"][0]["data"]["value"] = json!("updated");
+    c.artifact_sha256 = "updated".into();
+    let observed = k.observe(&c)?;
+    let update = k.prepare_change(&c, &observed, "update")?;
+    std::fs::write(&token, "second-test-token")?;
+    assert!(k.execute_change(&c, &update).is_err());
+    assert_eq!(k.api.writes, 1);
+    let update = k.prepare_change(&c, &observed, "fresh-update")?;
+    c.inventory = k.execute_change(&c, &update)?.inventory;
+    let observed = k.observe_removal(&c)?;
+    let remove = k.prepare_removal(&c, &observed, "remove")?;
+    std::fs::write(&token, "third-test-token")?;
+    assert!(k.execute_removal(&c, &remove).is_err());
+    assert_eq!(k.api.writes, 2);
+    let remove = k.prepare_removal(&c, &observed, "fresh-remove")?;
+    assert!(!k.execute_removal(&c, &remove)?.exists);
+    Ok(())
 }
 fn context(work: std::path::PathBuf) -> Result<Context> {
     let unit: Unit = serde_json::from_value(

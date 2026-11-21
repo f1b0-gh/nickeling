@@ -27,13 +27,16 @@ pub struct BackendConfig {
     pub kind: String,
     pub configuration: Value,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KubernetesTarget {
     pub server: String,
     pub namespace: String,
     #[serde(default)]
     pub ca_file: Option<PathBuf>,
+    /// Offline proof for an explicitly requested legacy binding upgrade; never TLS roots.
+    #[serde(default)]
+    pub previous_ca_file: Option<PathBuf>,
     #[serde(default)]
     pub token_file: Option<PathBuf>,
     #[serde(default)]

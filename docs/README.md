@@ -10,6 +10,7 @@
 | Use the shared primitives | [nickel-util](../crates/nickel-util/README.md) |
 | Install a CLI and locate its resources | [Installation](../README.md#installation-and-resources) |
 | Build and test | [Development](development.md) |
+| Test against a disposable real Kubernetes API | [Local and CI kind tests](kubernetes-testing.md) |
 | Maintain versions and review advisories | [Dependencies](dependencies.md) |
 | Understand the project's origins and boundaries | [Extraction](extraction.md) |
 
