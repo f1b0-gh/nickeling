@@ -237,6 +237,22 @@ explicit migration facility. The controller does not guess the old trust mode.
 New objects use POST; existing owned objects use server-side apply without
 force, bound to UID and resourceVersion. This avoids accidental adoption on
 create. Ownership labels alone do not authorize adopting an existing object.
+POST records an Update field owner, which is distinct from an Apply owner. Before
+the first subsequent configuration apply, the controller prepares a separate
+ownership transfer plan. Its public summary reports `fieldOwnershipTransfers`
+and zero configuration updates. The plan changes only its own managed-fields
+entry from Update to Apply, with UID, resourceVersion and exact-entry tests;
+foreign field owners and workload configuration remain unchanged. Ambiguous
+histories with multiple own entries require explicit migration and are refused.
+Transfer entries are limited to 256 KiB and transfer plans to 4 MiB.
+
+Review and apply this handoff, then prepare and review a fresh configuration plan.
+The configuration remains pending and the unit is not applied or ready until
+ordinary server-side apply completes. Pending state survives restarts and partial
+handoffs. Manage mode performs the second phase on a subsequent reconciliation;
+manual approval requires that additional plan and apply. The controller never
+forces field conflicts or adopts an existing object to bypass this handoff.
+
 Pruning uses recorded inventory plus UID/resourceVersion delete preconditions.
 Known workload kinds use observed generation and replica status; other supported
 kinds have explicit existence/allocation checks. These checks are not a health
@@ -246,6 +262,10 @@ Deployment completion requires the desired total, updated, ready and available
 replica counts, including scale-to-zero. A current-generation `Progressing=False`
 condition reports failed readiness without exposing the server's message.
 Ownership remains observable, and a corrected configuration can still be applied.
+For Deployment and StatefulSet CPU/memory requests and limits, drift comparison
+recognizes equivalent numeric quantity spellings such as `1000m` and `1`.
+Unsupported quantities beyond the bounded parser remain conservative drift;
+normalization of other schema fields is not generally covered.
 
 A bounded watch on one known object per unit supplies scheduling hints. Expired
 watches trigger coalesced observation; transport failures wait for periodic full

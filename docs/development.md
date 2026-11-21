@@ -44,7 +44,10 @@ passes, failures, blocked checks and coverage gaps. A confinement failure must
 remain a refusal; do not weaken the sandbox to make a test pass.
 
 OpenTofu tests use disposable local state and explicitly prepared providers.
-Kubernetes tests use fixtures and do not qualify a live cluster. Container tests
+Ordinary Kubernetes tests use fixtures. Run `python3 scripts/test-kind.py` to
+exercise the real API in an owned disposable kind cluster; see the
+[local and CI testing guide](kubernetes-testing.md) for prerequisites, evidence
+and cleanup. These tests do not qualify k3s or production deployments. Container tests
 have a separate [qualification procedure](../crates/nickel-plane/containers/GUIDE.md).
 An unvalidated audit lead is not a confirmed vulnerability.
 
@@ -63,6 +66,12 @@ It covers local fixtures, not live Kubernetes, Scaleway or container VM
 qualification. Automated advisory scanning and the exact-version divergence
 baseline check are not yet wired into CI; passing this workflow does not
 establish their coverage.
+
+The separate [Kubernetes API workflow](../.github/workflows/kind.yml) runs the
+same kind driver as local development. Its `Kubernetes API (kind)` job checks
+real API behavior using a digest-pinned Kubernetes 1.34 node image, with an
+explicit private kubeconfig and automatic cleanup of the owned cluster. It does
+not deploy to an external cluster or establish Scaleway readiness.
 
 ## Release readiness
 

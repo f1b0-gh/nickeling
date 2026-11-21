@@ -1,0 +1,46 @@
+name: Kubernetes API
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kind-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kind:
+    name: Kubernetes API (kind)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+      RUST_TEST_THREADS: '1'
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+        with:
+          enable_kvm: false
+          set_as_trusted_user: false
+          extra_nix_config: |
+            max-jobs = 2
+            cores = 2
+      - name: Exercise the real API and clean up the owned cluster
+        run: |
+          python3 -m unittest discover -s scripts/tests -v
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/nickeling-kind-target"
+          nix develop --no-update-lock-file --no-write-lock-file \
+            path:./crates/nickel-plane --command \
+            python3 scripts/test-kind.py --output "$RUNNER_TEMP/nickeling-kind-evidence"
+      - name: Verify lockfiles were preserved
+        if: always()
+        run: git diff --exit-code -- Cargo.lock ':(glob)**/flake.lock'
