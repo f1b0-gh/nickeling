@@ -20,6 +20,7 @@ pub struct OutputValue {
 pub enum Readiness {
     Ready,
     NotReady,
+    Failed,
     #[default]
     Unsupported,
 }

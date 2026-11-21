@@ -27,6 +27,7 @@ struct World {
     fail: bool,
     fail_after_delete: bool,
     ready: bool,
+    readiness: Option<Readiness>,
     cancel: Option<Arc<AtomicBool>>,
 }
 struct Fake {
@@ -46,11 +47,11 @@ impl Backend for Fake {
         Ok(Observation {
             exists: value.is_some(),
             drifted: value != Some(&c.artifact),
-            readiness: if w.ready {
+            readiness: w.readiness.unwrap_or(if w.ready {
                 Readiness::Ready
             } else {
                 Readiness::Unsupported
-            },
+            }),
             outputs: if w.missing {
                 BTreeMap::new()
             } else {
@@ -320,6 +321,49 @@ fn planning_removed_units_does_not_execute_deletion() -> Result<()> {
     let state = s.unit("mixed", "a-app")?.unwrap();
     assert!(state.failure.is_none(), "{:?}", state.failure);
     assert_eq!(state.prepared.unwrap().summary.deletes, 1);
+    Ok(())
+}
+
+#[test]
+fn failed_rollout_reports_failure_without_blocking_correction_or_recovery() -> Result<()> {
+    let (_tmp, mut s, mut c, w, mut r) = fixture()?;
+    w.lock().unwrap().readiness = Some(Readiness::Failed);
+    s.submit(&c)?;
+    reconcile(&mut s, &c, &Validate, &mut r, &Options::default())?;
+    let state = s.unit("mixed", "z-infra")?.unwrap();
+    assert_eq!(state.public()["conditions"]["Failed"], true);
+    assert!(!state.inventory.is_null());
+    assert_eq!(w.lock().unwrap().writes, vec!["z-infra"]);
+    assert!(s.running("mixed", "z-infra")?.is_none());
+    reconcile(&mut s, &c, &Validate, &mut r, &Options::default())?;
+    assert_eq!(
+        s.unit("mixed", "z-infra")?.unwrap().public()["conditions"]["Failed"],
+        true
+    );
+    assert_eq!(w.lock().unwrap().writes, vec!["z-infra"]);
+
+    c.instance.units.get_mut("z-infra").unwrap().configuration["message"] = json!("fixed");
+    c.units.get_mut("z-infra").unwrap().artifact = json!({"message":"fixed"});
+    c.revision = c.digest()?;
+    s.submit(&c)?;
+    reconcile(&mut s, &c, &Validate, &mut r, &Options::default())?;
+    assert_eq!(w.lock().unwrap().values["z-infra"]["message"], "fixed");
+    assert_eq!(w.lock().unwrap().writes, vec!["z-infra", "z-infra"]);
+    assert_eq!(
+        s.unit("mixed", "z-infra")?.unwrap().public()["conditions"]["Failed"],
+        true
+    );
+
+    w.lock().unwrap().readiness = Some(Readiness::Ready);
+    reconcile(&mut s, &c, &Validate, &mut r, &Options::default())?;
+    assert_eq!(
+        s.unit("mixed", "z-infra")?.unwrap().public()["conditions"]["Failed"],
+        false
+    );
+    assert_eq!(
+        w.lock().unwrap().writes,
+        vec!["z-infra", "z-infra", "a-app"]
+    );
     Ok(())
 }
 

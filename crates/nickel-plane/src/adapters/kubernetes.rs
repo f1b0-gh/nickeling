@@ -298,9 +298,9 @@ fn subset(desired: &Value, actual: &Value) -> bool {
     )
 }
 
-fn ready(object: &Value) -> Readiness {
+fn ready(object: &Value) -> Result<Readiness> {
     if !object["metadata"]["deletionTimestamp"].is_null() {
-        return Readiness::NotReady;
+        return Ok(Readiness::NotReady);
     }
     let kind = object["kind"].as_str().unwrap_or_default();
     let yes = match kind {
@@ -324,22 +324,46 @@ fn ready(object: &Value) -> Readiness {
                     .is_some_and(|s| !s.is_empty())
             }
         }
-        "Deployment" | "StatefulSet" => {
+        "Deployment" => {
+            if object["status"]["observedGeneration"].as_u64().unwrap_or(0)
+                < object["metadata"]["generation"].as_u64().unwrap_or(1)
+            {
+                return Ok(Readiness::NotReady);
+            }
+            if object["status"]["conditions"]
+                .as_array()
+                .is_some_and(|conditions| {
+                    conditions.iter().any(|condition| {
+                        condition["type"] == "Progressing" && condition["status"] == "False"
+                    })
+                })
+            {
+                return Ok(Readiness::Failed);
+            }
+            let replicas = object["spec"]["replicas"].as_u64().unwrap_or(1);
+            [
+                "replicas",
+                "readyReplicas",
+                "updatedReplicas",
+                "availableReplicas",
+            ]
+            .iter()
+            .all(|field| object["status"][field].as_u64().unwrap_or(0) == replicas)
+        }
+        "StatefulSet" => {
             let replicas = object["spec"]["replicas"].as_u64().unwrap_or(1);
             object["status"]["observedGeneration"].as_u64().unwrap_or(0)
                 >= object["metadata"]["generation"].as_u64().unwrap_or(1)
                 && object["status"]["readyReplicas"].as_u64().unwrap_or(0) >= replicas
                 && object["status"]["updatedReplicas"].as_u64().unwrap_or(0) >= replicas
-                && (kind != "Deployment"
-                    || object["status"]["availableReplicas"].as_u64().unwrap_or(0) >= replicas)
         }
-        _ => return Readiness::Unsupported,
+        _ => return Ok(Readiness::Unsupported),
     };
-    if yes {
+    Ok(if yes {
         Readiness::Ready
     } else {
         Readiness::NotReady
-    }
+    })
 }
 impl<A: Api> Kubernetes<A> {
     fn get(&mut self, path: &str) -> Result<Option<Value>> {
@@ -472,8 +496,8 @@ impl<A: Api> Backend for Kubernetes<A> {
                 outputs["resources"][&entry.kind][&entry.name] = object.clone();
                 if let Some(want) = wanted.get(&path) {
                     drifted |= !subset(want, &object);
-                    let r = ready(&object);
-                    if r != Readiness::Ready {
+                    let r = ready(&object)?;
+                    if r != Readiness::Ready && readiness != Readiness::Failed {
                         readiness = r;
                     }
                 } else {
@@ -485,7 +509,9 @@ impl<A: Api> Backend for Kubernetes<A> {
                 if wanted.contains_key(&path) {
                     exists = false;
                     drifted = true;
-                    readiness = Readiness::NotReady;
+                    if readiness != Readiness::Failed {
+                        readiness = Readiness::NotReady;
+                    }
                     if let Some(old) = previous.get(&path) {
                         let mut history = old.clone();
                         history.missing = true;

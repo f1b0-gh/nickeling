@@ -143,7 +143,8 @@ fn accept_observation(state: &mut UnitState, mut observation: Observation) {
     state.readiness = observation.readiness;
     state.drifted = observation.drifted;
     state.applied = observation.exists && !observation.drifted;
-    state.failure = None;
+    state.failure = (observation.readiness == Readiness::Failed)
+        .then(|| "Workload reports a failed rollout".into());
     state.waiting = None;
 }
 pub fn reconcile(

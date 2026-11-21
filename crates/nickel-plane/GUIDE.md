@@ -202,6 +202,10 @@ Known workload kinds use observed generation and replica status; other supported
 kinds have explicit existence/allocation checks. These checks are not a health
 probe of the application. Deletion is asynchronous when Kubernetes finalizers
 remain. Array observation is conservative about ordering and length.
+Deployment completion requires the desired total, updated, ready and available
+replica counts, including scale-to-zero. A current-generation `Progressing=False`
+condition reports failed readiness without exposing the server's message.
+Ownership remains observable, and a corrected configuration can still be applied.
 
 A bounded watch on one known object per unit supplies scheduling hints. Expired
 watches trigger coalesced observation; transport failures wait for periodic full
