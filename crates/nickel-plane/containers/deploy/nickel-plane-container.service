@@ -1,0 +1,18 @@
+[Unit]
+Description=Nickel-plane nspawn system container
+After=local-fs.target
+RequiresMountsFor=/var/lib/nickel-plane /etc/nickel-plane
+
+[Service]
+Type=notify
+NotifyAccess=all
+EnvironmentFile=/etc/nickel-plane-container.conf
+ExecStart=systemd-nspawn --keep-unit --register=no --settings=yes --machine=nickel-plane --uuid=${CONTAINER_UUID} --directory=${CONTAINER_ROOTFS}
+Delegate=yes
+KillMode=mixed
+TimeoutStopSec=1950
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+Generated contracts and supporting files are copied without modification from:
+https://github.com/nickel-lang/nickel-kubernetes
+revision f3a310db82a408d7e1935b98f7ce103263df5035
+See LICENSE and provenance.json.
+
+The .js2n-lib supporting library comes from json-schema-to-nickel, pinned by
+nickel-kubernetes's flake.lock to:
+https://github.com/nickel-lang/json-schema-to-nickel
+revision 6ba6950a06f79f4e5b43a2bda87c68c22918436e
+See LICENSE-js2n.
+
+The generator's Kubernetes schema source revision and the selected schema
+comparison with Kubernetes 1.34.1 are recorded in schema-equivalence.json.

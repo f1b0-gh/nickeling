@@ -1,0 +1,42 @@
+[package]
+license = "Apache-2.0"
+name = "nickel-plane"
+version = "0.1.0"
+edition = "2021"
+description = "Coordinate Kubernetes and OpenTofu units described in Nickel"
+repository = "https://github.com/f1b0-gh/nickeling"
+readme = "README.md"
+
+[dependencies]
+nickel-util = { path = "../nickel-util", version = "=0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tempfile = "3"
+libc = "0.2"
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+ureq = { version = "=3.5.0", default-features = false, features = ["rustls", "json"], optional = true }
+nickel-tf = { path = "../nickel-tf", version = "=0.1.0", default-features = false, optional = true }
+nickel-k8s = { path = "../nickel-k8s", version = "=0.1.0", default-features = false, optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+
+[features]
+default = ["cli", "opentofu", "kubernetes"]
+opentofu = ["dep:nickel-tf"]
+kubernetes = ["dep:nickel-k8s", "dep:ureq"]
+cli = ["dep:clap"]
+
+[[bin]]
+name = "nickel-plane"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

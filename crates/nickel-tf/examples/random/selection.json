@@ -1,0 +1,12 @@
+{
+  "engine": {
+    "name": "opentofu",
+    "version": "1.13.2"
+  },
+  "providers": {
+    "entropy": {
+      "source": "registry.opentofu.org/hashicorp/random",
+      "version": "3.9.1"
+    }
+  }
+}

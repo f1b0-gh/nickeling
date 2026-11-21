@@ -1,0 +1,5 @@
+Schema exported from bpg/terraform-provider-proxmox v0.118.0.
+Upstream source and embedded descriptions are licensed under MPL-2.0; see LICENSE.
+Generated Nickel contracts are derived from this frozen schema. Native provider
+lock was acquired from the pinned Nix provider mirror for linux_amd64.
+No Proxmox server version has been qualified.

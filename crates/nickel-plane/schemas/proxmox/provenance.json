@@ -1,0 +1,15 @@
+{
+  "provider": "registry.opentofu.org/bpg/proxmox",
+  "version": "0.118.0",
+  "engine": "OpenTofu 1.13.2",
+  "platform": "linux_amd64",
+  "nixpkgs": "1c89083e451e891152365b799595cf7790a43325",
+  "acquisition": [
+    "tofu init -backend=false -input=false",
+    "tofu providers schema -json"
+  ],
+  "schemaSha256": "2050bb9daa3b8d0a8feae907e6830920d1ea50c563417c9f1b73137b31c14d91",
+  "nativeLockSha256": "b1dfa587258f631b0cd58c3a5e89a481490189ee90cf2eca045250940c9b5ae1",
+  "source": "https://github.com/bpg/terraform-provider-proxmox/tree/v0.118.0",
+  "qualification": "Schema acquisition, offline Nickel rendering and native tofu validate only; no Proxmox endpoint contacted."
+}

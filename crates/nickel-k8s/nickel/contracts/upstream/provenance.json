@@ -1,0 +1,23 @@
+{
+  "repository": "https://github.com/nickel-lang/nickel-kubernetes",
+  "revision": "f3a310db82a408d7e1935b98f7ce103263df5035",
+  "kubernetes_version": "1.34.0",
+  "files": {
+    ".js2n-lib/Nickel-pkg.ncl": "37a55cc8a3c4a99f591ca918e4b3b76ae84e000b3e242724d6e99e2da11e9135",
+    ".js2n-lib/arrays.ncl": "4ac34c7d55d3a032e0b171625dec4a224362a54ebccf4a347b1f0345d7d95208",
+    ".js2n-lib/main.ncl": "521cd569ce78c321b6f7bbd4f0061341f521f0b089756b408847a3a65244c977",
+    ".js2n-lib/numbers.ncl": "0803af3651f27cda6c9db0e9ec6d4b01c836bd4f11fadc493f1d679712a3ef5f",
+    ".js2n-lib/records.ncl": "1d16a2d9aa7f70753665cbc17276da24731c01623a601bbf7db4b0c69178d54b",
+    ".js2n-lib/strings.ncl": "6d88f2fcce3fe5f5b9d1c14cf2e6f5cc07cb4477ba756d8c31f7ce23429cb3c3",
+    "configmap-v1.ncl": "76832af45a578651dac16d4a4784d46c40698295e2b67257f198b02a2e7db6fd",
+    "deployment-apps-v1.ncl": "00ef9b6a3cefc178be8282a07591da3adc69adbeb509889e02645bb4482ab6c9",
+    "ingress-networking-v1.ncl": "81b2146d67f538e318706ac8834461a3a92496450855ec05c7b7aa8bb3eebb23",
+    "namespace-v1.ncl": "0348fec22e193131fc6abc7153691b10d28131dbb903a628d3ad560982af53c4",
+    "networkpolicy-networking-v1.ncl": "e91842e1d77ed8c3c1bc4fcd4a512f49d9fc991bba691209a266969f4eb501f3",
+    "persistentvolumeclaim-v1.ncl": "7b2f9bfe1f2be0e60bf557976120d7a03e9b8edaf2994d93c62fd8737a75cc6a",
+    "service-v1.ncl": "10eba0acde50e7f8570c4097f591572041a159900599fa48eadaa2ea60829267",
+    "serviceaccount-v1.ncl": "05f1274f07e17af61f7547143b1ec905d59a5bf20b6818350412e58e23ab8d6a",
+    "statefulset-apps-v1.ncl": "d2c7a0c320619b0e1c32f91903e1059c07da3eb1ab16ca2cb07d1036127be8b1"
+  },
+  "license_sha256": "53f230653e0655fca6997a6f4bfae6416874a9f20782513c7ed77428510690e6"
+}

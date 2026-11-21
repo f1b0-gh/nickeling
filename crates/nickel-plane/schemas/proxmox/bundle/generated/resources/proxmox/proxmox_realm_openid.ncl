@@ -1,0 +1,21 @@
+let Core = import "/libraries/nickel-tf/contracts.ncl" in
+Core.ResourceFor "proxmox" "proxmox" ({
+"acr_values" | Core.Value (Core.Nullable (String)) | optional,
+"audiences" | Core.Value (Core.Nullable (String)) | optional,
+"autocreate" | Core.Value (Core.Nullable (Bool)) | optional,
+"client_id" | Core.Value (Core.NonNull (String)),
+"client_key" | Core.Value (Core.Nullable (String)) | optional,
+"client_key_wo" | Core.Value (Core.Nullable (String)) | optional,
+"client_key_wo_version" | Core.Value (Core.Nullable (Number)) | optional,
+"comment" | Core.Value (Core.Nullable (String)) | optional,
+"default" | Core.Value (Core.Nullable (Bool)) | optional,
+"groups_autocreate" | Core.Value (Core.Nullable (Bool)) | optional,
+"groups_claim" | Core.Value (Core.Nullable (String)) | optional,
+"groups_overwrite" | Core.Value (Core.Nullable (Bool)) | optional,
+"issuer_url" | Core.Value (Core.NonNull (String)),
+"prompt" | Core.Value (Core.Nullable (String)) | optional,
+"query_userinfo" | Core.Value (Core.Nullable (Bool)) | optional,
+"realm" | Core.Value (Core.NonNull (String)),
+"scopes" | Core.Value (Core.Nullable (String)) | optional,
+"username_claim" | Core.Value (Core.Nullable (String)) | optional,
+})

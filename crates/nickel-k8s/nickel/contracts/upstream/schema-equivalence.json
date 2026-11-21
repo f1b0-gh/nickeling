@@ -1,0 +1,133 @@
+{
+  "repository": "https://github.com/yannh/kubernetes-json-schema",
+  "nickel_contract_source_revision": "0fef34d97af594eec495ec49cd5b2a349e4a557f",
+  "comparison_revision": "86d045595d3f93b703bbf439cf9eb4bd6830d58f",
+  "schemas": {
+    "deployment-apps-v1": {
+      "v1.34.0": {
+        "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/0fef34d97af594eec495ec49cd5b2a349e4a557f/v1.34.0-standalone-strict/deployment-apps-v1.json",
+        "sha256": "92b7a333a49124f5300095d3e7786ca2038b7d6e602c309f73e90631377e4b0a",
+        "bytes": 688598
+      },
+      "v1.34.1": {
+        "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/86d045595d3f93b703bbf439cf9eb4bd6830d58f/v1.34.1-standalone-strict/deployment-apps-v1.json",
+        "sha256": "92b7a333a49124f5300095d3e7786ca2038b7d6e602c309f73e90631377e4b0a",
+        "bytes": 688598
+      },
+      "byte_identical": true,
+      "json_identical": true
+    },
+    "statefulset-apps-v1": {
+      "v1.34.0": {
+        "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/0fef34d97af594eec495ec49cd5b2a349e4a557f/v1.34.0-standalone-strict/statefulset-apps-v1.json",
+        "sha256": "e095a9d88776fbb2e9c9312baac322c992a9f5188f81ae690bb7dc00fc3915fa",
+        "bytes": 735894
+      },
+      "v1.34.1": {
+        "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/86d045595d3f93b703bbf439cf9eb4bd6830d58f/v1.34.1-standalone-strict/statefulset-apps-v1.json",
+        "sha256": "e095a9d88776fbb2e9c9312baac322c992a9f5188f81ae690bb7dc00fc3915fa",
+        "bytes": 735894
+      },
+      "byte_identical": true,
+      "json_identical": true
+    },
+    "service-v1": {
+      "v1.34.0": {
+        "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/0fef34d97af594eec495ec49cd5b2a349e4a557f/v1.34.0-standalone-strict/service-v1.json",
+        "sha256": "8bf019854daed511e7c174896a898173fa65d88ec5937c687a37303d4cc9351b",
+        "bytes": 43682
+      },
+      "v1.34.1": {
+        "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/86d045595d3f93b703bbf439cf9eb4bd6830d58f/v1.34.1-standalone-strict/service-v1.json",
+        "sha256": "8bf019854daed511e7c174896a898173fa65d88ec5937c687a37303d4cc9351b",
+        "bytes": 43682
+      },
+      "byte_identical": true,
+      "json_identical": true
+    },
+    "configmap-v1": {
+      "v1.34.0": {
+        "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/0fef34d97af594eec495ec49cd5b2a349e4a557f/v1.34.0-standalone-strict/configmap-v1.json",
+        "sha256": "e0eaddebd677c08aa092b2da2264d86ac4fc34eed112b9fac2945b3f00c1e9b1",
+        "bytes": 17083
+      },
+      "v1.34.1": {
+        "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/86d045595d3f93b703bbf439cf9eb4bd6830d58f/v1.34.1-standalone-strict/configmap-v1.json",
+        "sha256": "e0eaddebd677c08aa092b2da2264d86ac4fc34eed112b9fac2945b3f00c1e9b1",
+        "bytes": 17083
+      },
+      "byte_identical": true,
+      "json_identical": true
+    },
+    "namespace-v1": {
+      "v1.34.0": {
+        "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/0fef34d97af594eec495ec49cd5b2a349e4a557f/v1.34.0-standalone-strict/namespace-v1.json",
+        "sha256": "324fae677b98d1a6d54340db0c334d053e8ffbafceb3f73326e41de2610d5843",
+        "bytes": 18892
+      },
+      "v1.34.1": {
+        "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/86d045595d3f93b703bbf439cf9eb4bd6830d58f/v1.34.1-standalone-strict/namespace-v1.json",
+        "sha256": "324fae677b98d1a6d54340db0c334d053e8ffbafceb3f73326e41de2610d5843",
+        "bytes": 18892
+      },
+      "byte_identical": true,
+      "json_identical": true
+    },
+    "ingress-networking-v1": {
+      "v1.34.0": {
+        "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/0fef34d97af594eec495ec49cd5b2a349e4a557f/v1.34.0-standalone-strict/ingress-networking-v1.json",
+        "sha256": "4e0f63ad84c2bf22565e489d1f4b885ddaa9f6bf7cff1ddd562553760afe4d79",
+        "bytes": 35503
+      },
+      "v1.34.1": {
+        "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/86d045595d3f93b703bbf439cf9eb4bd6830d58f/v1.34.1-standalone-strict/ingress-networking-v1.json",
+        "sha256": "4e0f63ad84c2bf22565e489d1f4b885ddaa9f6bf7cff1ddd562553760afe4d79",
+        "bytes": 35503
+      },
+      "byte_identical": true,
+      "json_identical": true
+    },
+    "networkpolicy-networking-v1": {
+      "v1.34.0": {
+        "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/0fef34d97af594eec495ec49cd5b2a349e4a557f/v1.34.0-standalone-strict/networkpolicy-networking-v1.json",
+        "sha256": "f6324cc464f62228b0418f438d167208e4f86c7e3677ba30f608e79a8b26ba79",
+        "bytes": 47155
+      },
+      "v1.34.1": {
+        "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/86d045595d3f93b703bbf439cf9eb4bd6830d58f/v1.34.1-standalone-strict/networkpolicy-networking-v1.json",
+        "sha256": "f6324cc464f62228b0418f438d167208e4f86c7e3677ba30f608e79a8b26ba79",
+        "bytes": 47155
+      },
+      "byte_identical": true,
+      "json_identical": true
+    },
+    "persistentvolumeclaim-v1": {
+      "v1.34.0": {
+        "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/0fef34d97af594eec495ec49cd5b2a349e4a557f/v1.34.0-standalone-strict/persistentvolumeclaim-v1.json",
+        "sha256": "5ec592cb5f004c0e24fa080dd84f48b9339cd0c82248a78d37b6a3e1b4d7ab34",
+        "bytes": 36401
+      },
+      "v1.34.1": {
+        "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/86d045595d3f93b703bbf439cf9eb4bd6830d58f/v1.34.1-standalone-strict/persistentvolumeclaim-v1.json",
+        "sha256": "5ec592cb5f004c0e24fa080dd84f48b9339cd0c82248a78d37b6a3e1b4d7ab34",
+        "bytes": 36401
+      },
+      "byte_identical": true,
+      "json_identical": true
+    },
+    "serviceaccount-v1": {
+      "v1.34.0": {
+        "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/0fef34d97af594eec495ec49cd5b2a349e4a557f/v1.34.0-standalone-strict/serviceaccount-v1.json",
+        "sha256": "8193d6c3561475c6d3d5c44e1faedb1df53905373d904bc17015694326d659cf",
+        "bytes": 21064
+      },
+      "v1.34.1": {
+        "url": "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/86d045595d3f93b703bbf439cf9eb4bd6830d58f/v1.34.1-standalone-strict/serviceaccount-v1.json",
+        "sha256": "8193d6c3561475c6d3d5c44e1faedb1df53905373d904bc17015694326d659cf",
+        "bytes": 21064
+      },
+      "byte_identical": true,
+      "json_identical": true
+    }
+  }
+}

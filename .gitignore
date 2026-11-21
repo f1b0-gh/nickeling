@@ -1,0 +1,35 @@
+# Build outputs and caches
+/target/
+**/target/
+/.build/
+/result
+/result-*
+**/__pycache__/
+*.pyc
+.direnv/
+.venv/
+
+# Local version-control and agent metadata
+/.local/
+/.jj/
+/.superpowers/
+/.publication/
+/.agents/
+/.codex/
+/.aws/
+
+# Runtime state, credentials and generated reports
+/state/
+/exports/
+/reports/
+/docs/superpowers/
+/docs/bootc-podman/
+**/.terraform/
+*.tfstate
+*.tfstate.*
+.env
+.env.*
+credentials.json
+auth.json
+*.log
+# Provider/schema locks, source fixtures and third-party notices remain tracked.

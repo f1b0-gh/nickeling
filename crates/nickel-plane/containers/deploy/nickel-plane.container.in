@@ -1,0 +1,43 @@
+[Unit]
+Description=Nickel-plane rootless system container
+# Do not activate without the matching ID-based cleanup override.
+ConditionPathExists=%h/.config/systemd/user/%N.service.d/10-container-id.conf
+
+[Quadlet]
+# The default network is deliberately loopback-only; startup needs no online target.
+DefaultDependencies=false
+
+[Container]
+Image=@IMAGE_ID@
+Pull=never
+ContainerName=nickel-plane
+Exec=/usr/bin/init
+User=0
+UserNS=keep-id:uid=1000,gid=1000
+Network=none
+ReadOnly=true
+ReadOnlyTmpfs=false
+NoNewPrivileges=true
+Notify=true
+# Only PID 1 / private Nix initialization need SYS_ADMIN in the user namespace.
+# nickel-plane.service drops all capabilities before running the controller.
+AddCapability=SYS_ADMIN
+Tmpfs=/run:rw,nosuid,nodev,mode=0755,size=128M
+Tmpfs=/var:rw,nosuid,nodev,mode=0755,size=1G
+Tmpfs=/tmp:rw,nosuid,nodev,mode=1777,size=256M
+Volume=%h/.local/share/nickel-plane:/var/lib/nickel-plane:rw
+Volume=%h/.config/nickel-plane:/etc/nickel-plane:ro
+# Set container_uuid once per deployment and preserve it across image changes.
+EnvironmentFile=%h/.config/nickel-plane/container.env
+# Refuse an existing container with this name instead of adopting/replacing it.
+PodmanArgs=--replace=false --cidfile=%t/%N/${INVOCATION_ID}.cid --systemd=always --http-proxy=false --no-hosts
+StopTimeout=1900
+
+[Service]
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=180
+TimeoutStopSec=1950
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,31 @@
+[Unit]
+Description=Nickel composition controller
+Requires=nickel-nix-init.service
+After=nickel-nix-init.service
+ConditionPathExists=/etc/nickel-plane/instance/main.ncl
+
+[Service]
+Type=simple
+User=nickel-plane
+Group=nickel-plane
+UMask=0077
+WorkingDirectory=/var/lib/nickel-plane
+Environment=PATH=/usr/bin HOME=/var/cache/nickel-plane XDG_CACHE_HOME=/var/cache/nickel-plane NIX_REMOTE=local NIX_IGNORE_SYMLINK_STORE=1
+# Configuration contains CLI argument tokens only; credential values belong in
+# explicit read-only files referenced by targets.json, never in this file.
+EnvironmentFile=/etc/nickel-plane/controller.conf
+ExecStart=/usr/bin/nickel-plane serve --config /etc/nickel-plane/instance/main.ncl --resources /opt/nickel/plane --targets /etc/nickel-plane/targets.json --store /var/lib/nickel-plane --interval-seconds 30 $PLANE_ARGS
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=1900
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/nickel-plane /var/cache/nickel-plane /usr/lib/nix/store /var/lib/nickel-nix/nix /run/nickel-proc-private/proc
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

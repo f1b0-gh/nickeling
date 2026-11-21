@@ -1,0 +1,23 @@
+# Build context: the Nickeling repository root.
+# For the Nix-built systemd-nspawn target, see crates/nickel-plane/containers/README.md.
+# This separate OCI template has not been qualified by that target's tests.
+# Supply digest-pinned images. Builder needs Rust/C/linker; runtime needs Nix,
+# bubblewrap, util-linux, the selected OpenTofu executable and its provider mirror.
+ARG BUILDER_IMAGE
+ARG RUNTIME_IMAGE
+FROM ${BUILDER_IMAGE} AS build
+WORKDIR /src/nickeling
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+ENV CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/build
+RUN cargo build --release --locked --package nickel-plane
+
+FROM ${RUNTIME_IMAGE}
+COPY --from=build /build/release/nickel-plane /usr/local/bin/nickel-plane
+COPY --from=build /src/nickeling/crates/nickel-plane/nickel /opt/nickel-plane/nickel
+COPY --from=build /src/nickeling/crates/nickel-plane/flake.* /opt/nickel-plane/
+COPY --from=build /src/nickeling/crates/nickel-tf/nickel /opt/nickel-tf/nickel
+COPY --from=build /src/nickeling/crates/nickel-tf/flake.* /opt/nickel-tf/
+COPY --from=build /src/nickeling/crates/nickel-k8s/nickel /opt/nickel-k8s/nickel
+COPY --from=build /src/nickeling/crates/nickel-k8s/flake.* /opt/nickel-k8s/
+ENTRYPOINT ["/usr/local/bin/nickel-plane"]

@@ -1,0 +1,25 @@
+let Core = import "/libraries/nickel-tf/contracts.ncl" in
+Core.ResourceFor "proxmox" "proxmox" ({
+"content" | Core.Value (Core.Nullable (Array (Core.Value (Core.Nullable (String))))) | optional,
+"datastore" | Core.Value (Core.NonNull (String)),
+"disable" | Core.Value (Core.Nullable (Bool)) | optional,
+"encryption_key" | Core.Value (Core.Nullable (String)) | optional,
+"fingerprint" | Core.Value (Core.Nullable (String)) | optional,
+"generate_encryption_key" | Core.Value (Core.Nullable (Bool)) | optional,
+"id" | Core.Value (Core.NonNull (String)),
+"namespace" | Core.Value (Core.Nullable (String)) | optional,
+"nodes" | Core.Value (Core.Nullable (Array (Core.Value (Core.Nullable (String))))) | optional,
+"password" | Core.Value (Core.NonNull (String)),
+"server" | Core.Value (Core.NonNull (String)),
+"username" | Core.Value (Core.NonNull (String)),
+"backups" | {
+"keep_all" | Core.Value (Core.Nullable (Bool)) | optional,
+"keep_daily" | Core.Value (Core.Nullable (Number)) | optional,
+"keep_hourly" | Core.Value (Core.Nullable (Number)) | optional,
+"keep_last" | Core.Value (Core.Nullable (Number)) | optional,
+"keep_monthly" | Core.Value (Core.Nullable (Number)) | optional,
+"keep_weekly" | Core.Value (Core.Nullable (Number)) | optional,
+"keep_yearly" | Core.Value (Core.Nullable (Number)) | optional,
+"max_protected_backups" | Core.Value (Core.Nullable (Number)) | optional,
+} | optional,
+})

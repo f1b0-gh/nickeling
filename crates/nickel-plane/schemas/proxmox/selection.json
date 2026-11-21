@@ -1,0 +1,12 @@
+{
+  "engine": {
+    "name": "opentofu",
+    "version": "1.13.2"
+  },
+  "providers": {
+    "proxmox": {
+      "source": "registry.opentofu.org/bpg/proxmox",
+      "version": "0.118.0"
+    }
+  }
+}

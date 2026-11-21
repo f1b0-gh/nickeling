@@ -1,0 +1,6 @@
+{
+  version = 1,
+  architecture = 'x86_64_linux,
+  revision = "1",
+  adapters = ['opentofu, 'kubernetes],
+} | (import "schema.ncl")

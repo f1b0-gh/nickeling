@@ -1,0 +1,24 @@
+[Unit]
+Description=Nickel composition controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nickel-plane
+Group=nickel-plane
+UMask=0077
+StateDirectory=nickel-plane
+StateDirectoryMode=0700
+WorkingDirectory=/opt/nickel-plane
+# Install pinned binaries and frozen schemas before enabling this example.
+ExecStart=/usr/local/bin/nickel-plane serve --config /etc/nickel-plane/instance/main.ncl --resources /opt/nickel-plane --targets /etc/nickel-plane/targets.json --tf-resources /opt/nickel-tf --k8s-resources /opt/nickel-k8s --schema local=/etc/nickel-plane/schemas/local --store /var/lib/nickel-plane --interval-seconds 30
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=1900
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

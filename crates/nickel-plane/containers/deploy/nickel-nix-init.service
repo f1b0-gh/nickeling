@@ -1,0 +1,11 @@
+[Unit]
+Description=Initialize private offline Nix evaluation store
+Before=nickel-plane.service
+After=local-fs.target
+RequiresMountsFor=/var/lib/nickel-plane
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/sh /usr/libexec/nickel-nix-init
+RemainAfterExit=yes
+Environment=PATH=/usr/bin

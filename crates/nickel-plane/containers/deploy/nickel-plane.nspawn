@@ -1,0 +1,17 @@
+[Exec]
+Boot=yes
+PrivateUsers=65536:65536
+ResolvConf=off
+LinkJournal=no
+
+[Files]
+ReadOnly=yes
+PrivateUsersOwnership=map
+TemporaryFileSystem=/var:mode=0755,size=1G
+TemporaryFileSystem=/tmp:mode=1777,size=256M
+Bind=/var/lib/nickel-plane:/var/lib/nickel-plane:idmap
+BindReadOnly=/etc/nickel-plane:/etc/nickel-plane:idmap
+
+[Network]
+Private=yes
+VirtualEthernet=no

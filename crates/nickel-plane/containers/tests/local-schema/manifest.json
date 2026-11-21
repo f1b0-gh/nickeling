@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "files": {
+    "generated/data/terraform/terraform_remote_state.ncl": "e05a86dda4810db80ca383374100899b88e36c4e2b5f78e4ee7629564ca9685e",
+    "generated/providers/terraform.ncl": "30e4d0ca3033b8f6cdfcaed1335e3516b974ee999edfb62f1156cbd8b044c03f",
+    "generated/resources/terraform/terraform_data.ncl": "473f0b45faabeb62b7fa453c76457b181480097da37a84252d5f63ffa09e8916",
+    "generated/schema.ncl": "d4fd16e02e78635464325b7064af826829cbf064bd1e8ba6009d0985a8044cca",
+    "schema.json": "cdbe5da8fe72ddb8844c074936ba220173704a5179663fb0a3f4aa76b8b823de",
+    "selection.json": "04274c4b90dd190f7b3fb3647a09dc3862ad8e1ee9dc7063110c51d82282436c"
+  }
+}

@@ -1,0 +1,267 @@
+#![allow(clippy::unwrap_used)]
+use nickel_plane::{
+    backend::*,
+    composition::{Compiled, CompiledUnit, Validator},
+    model::*,
+    reconcile::{reconcile, Options, Registry},
+    store::Store,
+    Error, Result,
+};
+use serde_json::{json, Value};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+};
+#[derive(Default)]
+struct World {
+    values: BTreeMap<String, Value>,
+    writes: Vec<String>,
+    deletes: Vec<String>,
+    sensitive: bool,
+    missing: bool,
+    fail: bool,
+    ready: bool,
+    cancel: Option<Arc<AtomicBool>>,
+}
+struct Fake {
+    kind: BackendKind,
+    world: Arc<Mutex<World>>,
+}
+impl Backend for Fake {
+    fn kind(&self) -> BackendKind {
+        self.kind
+    }
+    fn fingerprint(&self) -> Result<String> {
+        Ok(format!("{:?}", self.kind))
+    }
+    fn observe(&mut self, c: &Context) -> Result<Observation> {
+        let w = self.world.lock().unwrap();
+        let value = w.values.get(&c.unit_id);
+        Ok(Observation {
+            exists: value.is_some(),
+            drifted: value != Some(&c.artifact),
+            readiness: if w.ready {
+                Readiness::Ready
+            } else {
+                Readiness::Unsupported
+            },
+            outputs: if w.missing {
+                BTreeMap::new()
+            } else {
+                BTreeMap::from([(
+                    "message".into(),
+                    OutputValue {
+                        value: value.and_then(|v| v.get("message")).cloned(),
+                        sensitive: w.sensitive,
+                        reference: Some("protected://value".into()),
+                    },
+                )])
+            },
+            inventory: value.cloned().unwrap_or(Value::Null),
+            preconditions: json!(value),
+        })
+    }
+    fn prepare_change(&mut self, c: &Context, o: &Observation, id: &str) -> Result<PreparedChange> {
+        Ok(PreparedChange {
+            operation: id.into(),
+            revision: c.revision.clone(),
+            artifact_sha256: c.artifact_sha256.clone(),
+            target_sha256: self.fingerprint()?,
+            summary: ChangeSummary {
+                creates: usize::from(!o.exists),
+                updates: usize::from(o.exists),
+                ..Default::default()
+            },
+            payload: Value::Null,
+            preconditions: o.preconditions.clone(),
+        })
+    }
+    fn execute_change(&mut self, c: &Context, _: &PreparedChange) -> Result<Observation> {
+        let mut w = self.world.lock().unwrap();
+        if w.fail {
+            return Err(Error::Backend("injected".into()));
+        }
+        w.writes.push(c.unit_id.clone());
+        w.values.insert(c.unit_id.clone(), c.artifact.clone());
+        if let Some(cancel) = &w.cancel {
+            cancel.store(true, Ordering::SeqCst)
+        }
+        drop(w);
+        self.observe(c)
+    }
+    fn remove(&mut self, c: &Context, _: &Observation) -> Result<Observation> {
+        let mut w = self.world.lock().unwrap();
+        w.deletes.push(c.unit_id.clone());
+        w.values.remove(&c.unit_id);
+        Ok(Observation::default())
+    }
+}
+struct Validate;
+impl Validator for Validate {
+    fn validate(&self, _: &Unit, v: &Value, b: &CompiledUnit) -> Result<CompiledUnit> {
+        let mut b = b.clone();
+        b.artifact = v.clone();
+        Ok(b)
+    }
+}
+type Fixture = (
+    tempfile::TempDir,
+    Store,
+    Compiled,
+    Arc<Mutex<World>>,
+    Registry,
+);
+fn fixture() -> Result<Fixture> {
+    let tmp = tempfile::tempdir()?;
+    let store = Store::open(&tmp.path().join("store"))?;
+    let instance: Instance = serde_json::from_value(
+        json!({"apiVersion":"nickel-plane/v1","id":"mixed","composition":{"name":"demo","version":"1"},"policy":{"mode":"manage","deletion":"delete","allowDelete":true},"units":{
+        "z-infra":{"backend":"opentofu","target":"local","schema":"local","configuration":{"message":"first"},"outputs":{"message":{"pointer":"/outputs/message"}}},
+        "a-app":{"backend":"kubernetes","target":"cluster","configuration":{"message":"pending"},"bindings":[{"fromUnit":"z-infra","output":"message","to":"/message","condition":"applied"}]}
+        }}),
+    )?;
+    let units = instance
+        .units
+        .iter()
+        .map(|(id, u)| {
+            (
+                id.clone(),
+                CompiledUnit {
+                    artifact: u.configuration.clone(),
+                    receipt: Value::Null,
+                    engine_version: None,
+                    provider_lock: None,
+                },
+            )
+        })
+        .collect();
+    let mut c = Compiled {
+        version: 1,
+        revision: String::new(),
+        instance,
+        inputs: Value::Null,
+        units,
+    };
+    c.revision = c.digest()?;
+    let world = Arc::new(Mutex::new(World::default()));
+    let registry = Registry::from([
+        (
+            "local".into(),
+            Box::new(Fake {
+                kind: BackendKind::OpenTofu,
+                world: world.clone(),
+            }) as Box<dyn Backend>,
+        ),
+        (
+            "cluster".into(),
+            Box::new(Fake {
+                kind: BackendKind::Kubernetes,
+                world: world.clone(),
+            }) as Box<dyn Backend>,
+        ),
+    ]);
+    Ok((tmp, store, c, world, registry))
+}
+#[test]
+fn restart_between_backends_resolves_only_current_applied_outputs() -> Result<()> {
+    let (tmp, mut s, mut c, w, mut r) = fixture()?;
+    s.submit(&c)?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    w.lock().unwrap().cancel = Some(cancel.clone());
+    assert!(matches!(
+        reconcile(
+            &mut s,
+            &c,
+            &Validate,
+            &mut r,
+            &Options {
+                cancelled: cancel.clone(),
+                ..Default::default()
+            }
+        ),
+        Err(Error::Cancelled)
+    ));
+    assert_eq!(w.lock().unwrap().writes, vec!["z-infra"]);
+    drop(s);
+    let mut s = Store::open(&tmp.path().join("store"))?;
+    w.lock().unwrap().cancel = None;
+    reconcile(&mut s, &c, &Validate, &mut r, &Options::default())?;
+    assert_eq!(w.lock().unwrap().writes, vec!["z-infra", "a-app"]);
+    assert_eq!(w.lock().unwrap().values["a-app"]["message"], "first");
+    c.instance.units.get_mut("z-infra").unwrap().configuration["message"] = json!("next");
+    c.units.get_mut("z-infra").unwrap().artifact = json!({"message":"next"});
+    c.revision = c.digest()?;
+    s.submit(&c)?;
+    w.lock().unwrap().fail = true;
+    reconcile(&mut s, &c, &Validate, &mut r, &Options::default())?;
+    assert!(!s.unit("mixed", "a-app")?.unwrap().applied);
+    assert!(s.unit("mixed", "a-app")?.unwrap().outputs.is_empty());
+    assert_eq!(w.lock().unwrap().writes.len(), 2);
+    Ok(())
+}
+#[test]
+fn missing_sensitive_and_unsupported_ready_outputs_never_satisfy_dependencies() -> Result<()> {
+    for case in ["missing", "sensitive", "ready"] {
+        let (_tmp, mut s, mut c, w, mut r) = fixture()?;
+        match case {
+            "missing" => w.lock().unwrap().missing = true,
+            "sensitive" => w.lock().unwrap().sensitive = true,
+            _ => c.instance.units.get_mut("a-app").unwrap().bindings[0].condition = Gate::Ready,
+        }
+        c.revision = c.digest()?;
+        s.submit(&c)?;
+        reconcile(&mut s, &c, &Validate, &mut r, &Options::default())?;
+        assert_eq!(w.lock().unwrap().writes, vec!["z-infra"]);
+        let app = s.unit("mixed", "a-app")?.unwrap();
+        assert!(!app.applied);
+        if case == "sensitive" {
+            assert!(app.failure.is_some());
+            assert!(!s
+                .unit("mixed", "z-infra")?
+                .unwrap()
+                .public()
+                .to_string()
+                .contains("first"));
+        } else {
+            assert!(app.waiting.is_some());
+        }
+    }
+    Ok(())
+}
+#[test]
+fn deletion_uses_reverse_dependencies_and_does_not_replay_completed_removal() -> Result<()> {
+    let (_tmp, mut s, c, w, mut r) = fixture()?;
+    s.submit(&c)?;
+    reconcile(&mut s, &c, &Validate, &mut r, &Options::default())?;
+    s.mark_removed("mixed", true)?;
+    reconcile(&mut s, &c, &Validate, &mut r, &Options::default())?;
+    reconcile(&mut s, &c, &Validate, &mut r, &Options::default())?;
+    assert_eq!(w.lock().unwrap().deletes, vec!["a-app", "z-infra"]);
+    Ok(())
+}
+#[test]
+fn retained_units_are_never_deleted_and_retry_is_bounded() -> Result<()> {
+    let (_tmp, mut s, c, w, mut r) = fixture()?;
+    s.submit(&c)?;
+    w.lock().unwrap().fail = true;
+    for now in [1, 10, 100, 1000, 10000, 100000] {
+        reconcile(
+            &mut s,
+            &c,
+            &Validate,
+            &mut r,
+            &Options {
+                now,
+                ..Default::default()
+            },
+        )?;
+    }
+    assert_eq!(s.unit("mixed", "z-infra")?.unwrap().attempts, 5);
+    s.mark_removed("mixed", false)?;
+    reconcile(&mut s, &c, &Validate, &mut r, &Options::default())?;
+    assert!(w.lock().unwrap().deletes.is_empty());
+    Ok(())
+}

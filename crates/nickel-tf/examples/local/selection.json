@@ -1,0 +1,12 @@
+{
+  "engine": {
+    "name": "opentofu",
+    "version": "1.13.2"
+  },
+  "providers": {
+    "terraform": {
+      "source": "terraform.io/builtin/terraform",
+      "version": null
+    }
+  }
+}

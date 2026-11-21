@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Rust and native fixtures
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+      RUST_TEST_THREADS: '2'
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          enable_kvm: false
+          set_as_trusted_user: false
+          extra_nix_config: |
+            max-jobs = 2
+            cores = 2
+
+      - name: Prepare pinned native tools
+        run: |
+          nix build --no-update-lock-file --no-write-lock-file \
+            path:./crates/nickel-tf#nickel \
+            path:./crates/nickel-tf#opentofu \
+            path:./crates/nickel-tf#opentofu-local \
+            --out-link "$RUNNER_TEMP/nickeling-engines"
+
+      - name: Check and test in the pinned development shell
+        run: |
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/nickeling-target"
+          nix develop --no-update-lock-file --no-write-lock-file \
+            path:./crates/nickel-tf --command bash -euo pipefail <<'CHECKS'
+          NICKEL_BIN="$(nix eval --offline --raw --no-update-lock-file --no-write-lock-file path:./crates/nickel-tf#nickel.outPath)/bin/nickel"
+          TOFU_BIN="$(nix eval --offline --raw --no-update-lock-file --no-write-lock-file path:./crates/nickel-tf#opentofu.outPath)/bin/tofu"
+          TOFU_LOCAL_BIN="$(nix eval --offline --raw --no-update-lock-file --no-write-lock-file path:./crates/nickel-tf#opentofu-local.outPath)/bin/tofu"
+          export NICKEL_BIN TOFU_BIN TOFU_LOCAL_BIN
+
+          rustc --version
+          cargo --version
+          "$NICKEL_BIN" --version
+          "$TOFU_BIN" version
+          "$TOFU_LOCAL_BIN" version
+
+          cargo fetch --locked
+          export CARGO_NET_OFFLINE=true
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --workspace --all-features --locked
+          cargo check --workspace --lib --no-default-features --locked
+          cargo check -p nickel-plane --no-default-features --features cli,opentofu --locked
+          cargo check -p nickel-plane --no-default-features --features cli,kubernetes --locked
+          CHECKS
+
+      - name: Check that validation preserved lockfiles
+        run: git diff --exit-code -- Cargo.lock ':(glob)**/flake.lock'

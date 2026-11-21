@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/nickel-util", "crates/nickel-k8s", "crates/nickel-tf", "crates/nickel-plane"]
+resolver = "2"

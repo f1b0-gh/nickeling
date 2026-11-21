@@ -1,0 +1,11 @@
+{
+  "engine": "OpenTofu 1.13.2",
+  "nixpkgs_revision": "1c89083e451e891152365b799595cf7790a43325",
+  "export_command": "tofu providers schema -json",
+  "qualification": "local resources only; no cloud deployment",
+  "provider_build": "built-in",
+  "files_sha256": {
+    "schema.json": "cdbe5da8fe72ddb8844c074936ba220173704a5179663fb0a3f4aa76b8b823de",
+    "selection.json": "04274c4b90dd190f7b3fb3647a09dc3862ad8e1ee9dc7063110c51d82282436c"
+  }
+}

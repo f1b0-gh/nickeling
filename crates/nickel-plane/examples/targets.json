@@ -1,0 +1,8 @@
+{
+ "version":1,
+ "targets":{
+  "local":{"backend":"opentofu","config":{"binary":"/absolute/path/to/tofu","stack":"local-demo"}},
+  "cluster":{"backend":"kubernetes","config":{"server":"https://cluster.example.com:6443","namespace":"demo","caFile":"/etc/nickel-plane/cluster-ca.pem","tokenFile":"/etc/nickel-plane/cluster-token"}},
+  "proxmox":{"backend":"opentofu","config":{"binary":"/absolute/path/to/pinned-proxmox/tofu","stack":"proxmox-demo","credentials":"/etc/nickel-plane/proxmox.json"}}
+ }
+}

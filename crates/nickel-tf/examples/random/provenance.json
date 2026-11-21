@@ -1,0 +1,12 @@
+{
+  "engine": "OpenTofu 1.13.2",
+  "nixpkgs_revision": "1c89083e451e891152365b799595cf7790a43325",
+  "export_command": "tofu providers schema -json",
+  "qualification": "local resources only; no cloud deployment",
+  "provider_build": "Nix-packaged Random 3.9.1; native lock hashes the Nix wrapper for linux_amd64",
+  "files_sha256": {
+    "schema.json": "5c25a1977feb9f7251322a4052414bdbd7a91ea43d7c035fb4e3e4b6fe72a825",
+    "selection.json": "d3dbe632470e1552aefce900d7ca18dcfdc9f9501344b65d3aaf676bf90bb6a8",
+    ".terraform.lock.hcl": "c8e5ad0ab5e6243b457377105cc7cce84bece2dffd96bfca47e0ec1b0d53aeb1"
+  }
+}
