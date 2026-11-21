@@ -22,7 +22,21 @@ and `/proc/self/fd`.
 Workspace crates declare a local dependency on the exact version `=0.1.0`.
 For external consumers, pin a full source commit or use a versioned source
 archive as described in the [development guide](../../docs/development.md#rust-consumers).
-The package has no CLI feature and does not depend on Clap.
+The package has no CLI feature and does not depend on Clap or any other
+Nickeling crate. It is a library, so `cargo install` does not apply.
+
+For example, add this to a consumer's `Cargo.toml`, replacing the placeholder
+with the full commit SHA you reviewed:
+
+```toml
+[dependencies.nickel-util]
+git = "https://github.com/f1b0-gh/nickeling"
+rev = "<full-commit-sha>"
+```
+
+Cargo fetches the repository source and builds only the selected library and
+its dependencies. File, JSON and process operations do not require Nickel or
+Nix; the confined evaluation module requires the native evaluation tools.
 
 From the workspace root:
 
