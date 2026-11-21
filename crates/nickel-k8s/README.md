@@ -11,7 +11,7 @@ application modules. Compilation needs no cluster; deployment is a separate step
 
 ## Install
 
-After version 0.1.0 is published on crates.io:
+Install version 0.1.0 from crates.io:
 
 ```sh
 cargo install nickel-k8s --version 0.1.0 --locked
@@ -19,7 +19,7 @@ cargo install nickel-k8s --version 0.1.0 --locked
 
 The executable needs matching trusted Nickel/Nix resources; see
 [resource installation](https://github.com/f1b0-gh/nickeling/blob/main/docs/development.md#cli-installation-and-resources).
-Source-checkout commands below work before publication as well.
+The commands below use a source checkout.
 
 ## Render a manifest
 

@@ -75,7 +75,7 @@ not deploy to an external cluster or establish Scaleway readiness.
 
 ## Release readiness
 
-All four crates are preparing for a first crates.io release at 0.1.0. The kind
+All four crates are published on crates.io at 0.1.0. The kind
 suite provides the initial real Kubernetes API validation for that release;
 Scaleway deployment remains a separate validation milestone.
 
@@ -114,7 +114,7 @@ resources from a recorded source revision:
 | `nickel-plane --schema NAME=PATH` | A frozen schema bundle for that name |
 
 The crates.io archives include these resources, examples and license notices.
-After publication, a CLI can be installed with, for example,
+A CLI can be installed with, for example,
 `cargo install nickel-k8s --version 0.1.0 --locked`. To obtain its matching
 resources without a repository checkout:
 
@@ -143,11 +143,11 @@ stay outside source control. Preserve Cargo and Nix locks; follow the
 
 ## Rust consumers
 
-After publication, select `nickel-util = "=0.1.0"` (or the other crate's name)
+Select `nickel-util = "=0.1.0"` (or the other crate's name)
 in a consumer's dependencies. The workspace uses versioned local paths between
 its four crates; Cargo replaces those paths with registry dependencies when
-packaging. For an external consumer before a registry release, select a full Git commit or a versioned,
-verifiable source archive. An exact `=0.1.0` requirement alone does not identify
+packaging. To consume a source revision instead, select a full Git commit or
+a versioned, verifiable source archive. An exact `=0.1.0` requirement alone does not identify
 an unpublished source revision; an implicit sibling checkout is not portable.
 
 The compilers and controller expose libraries. Set `default-features = false`
