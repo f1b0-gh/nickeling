@@ -166,10 +166,17 @@ success is recoverable; composition execution is not atomic. Deleted dependents
 must finish before upstream resources are removed. Default retention performs
 no delete, and completed removal is not replayed.
 
-Status separates Rendered, Applied, Ready, Drifted and Failed. Automatic retries
-use exponential delays and stop after five failures for a revision. Explicit
-`--retry-failed` resets this budget once; new revisions reset it too. SIGINT and
-SIGTERM stop at safe boundaries after the current bounded operation finishes.
+Status separates Rendered, Applied, Ready, Drifted and Failed. One-shot workflows
+stop retrying after five failures for a revision. `serve` keeps retrying with
+exponential delays starting at two seconds and capped at 300 seconds. Attempt
+counts and retry deadlines survive service restarts; a retry runs on the first
+eligible reconciliation cycle at or after its deadline. Explicit `--retry-failed`
+resets attempt counts and deadlines once; new revisions reset them too. Persistent
+ownership, policy or stale-plan conflicts may be checked again, but retries never
+bypass those checks, authorize adoption, or substitute a new plan for an explicitly
+approved operation.
+SIGINT and SIGTERM stop at safe boundaries after the current bounded operation
+finishes.
 Watch events are coalesced with at least one second between service cycles.
 A failed watch waits for the configured periodic resynchronization; it does not
 trigger immediate recompilation. Quiet watches are polled at most four times a

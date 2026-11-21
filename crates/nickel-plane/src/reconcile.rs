@@ -22,6 +22,8 @@ pub struct Options {
     pub execute: bool,
     pub prepare: bool,
     pub retry_failed: bool,
+    /// Keep retrying at persisted deadlines instead of exhausting the one-shot budget.
+    pub continuous_retry: bool,
     pub approved_operation: Option<String>,
     pub cancelled: Arc<AtomicBool>,
 }
@@ -32,6 +34,7 @@ impl Default for Options {
             execute: true,
             prepare: false,
             retry_failed: false,
+            continuous_retry: false,
             approved_operation: None,
             cancelled: Arc::new(AtomicBool::new(false)),
         }
@@ -77,7 +80,7 @@ impl UnitState {
         self.applied = false;
         self.outputs.clear();
         self.attempts = self.attempts.saturating_add(1);
-        self.next_retry = now.saturating_add(2u64.pow(self.attempts.min(8)));
+        self.next_retry = now.saturating_add(2u64.pow(self.attempts.min(9)).min(300));
     }
 }
 fn satisfies(state: &UnitState, revision: &str, gate: Gate) -> bool {
@@ -182,7 +185,7 @@ pub fn reconcile(
             state.attempts = 0;
             state.next_retry = 0;
         }
-        if state.attempts >= 5 || state.next_retry > options.now {
+        if (!options.continuous_retry && state.attempts >= 5) || state.next_retry > options.now {
             continue;
         }
         let result = (|| -> Result<()> {
@@ -442,7 +445,7 @@ fn remove_selected(
             state.attempts = 0;
             state.next_retry = 0;
         }
-        if state.attempts >= 5 || state.next_retry > options.now {
+        if (!options.continuous_retry && state.attempts >= 5) || state.next_retry > options.now {
             break;
         }
         let result = (|| -> Result<()> {

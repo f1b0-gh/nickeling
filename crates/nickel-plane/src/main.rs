@@ -245,6 +245,7 @@ fn run_runtime(
             prepare,
             approved_operation: approved.clone(),
             retry_failed: runtime.retry_failed && first,
+            continuous_retry: interval.is_some(),
             cancelled: flag.clone(),
         };
         match reconcile::reconcile(&mut store, &compiled, &validator, &mut registry, &options) {
