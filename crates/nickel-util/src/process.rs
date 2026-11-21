@@ -65,7 +65,7 @@ pub fn capture_input(
 ) -> Result<Vec<u8>> {
     if input.len() > 16 * 1024 * 1024 {
         return Err(Error::InvalidInput {
-            message: "Entrée de processus supérieure à 16 Mio".into(),
+            message: "Process input exceeds 16 MiB".into(),
         });
     }
     let mut file = tempfile::tempfile()?;

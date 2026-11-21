@@ -28,7 +28,7 @@ fn modules(
     bytes: &mut usize,
     depth: usize,
 ) -> Result<()> {
-    ensure!(depth <= 32, "Modules Nickel trop imbriqués");
+    ensure!(depth <= 32, "Nickel module nesting limit exceeded");
     for entry in fs::read_dir(format!("/proc/self/fd/{}", dir.as_raw_fd()))? {
         let entry = entry?;
         let name = entry.file_name();
@@ -49,14 +49,14 @@ fn modules(
         *count += 1;
         ensure!(
             *count <= 1000,
-            "Trop d’entrées de configuration : placer les modules dans un dossier dédié (.sandbox)"
+            "Too many configuration entries: place modules in a dedicated directory (.sandbox)"
         );
         let kind = entry.file_type()?;
         let rel = relative.join(&name);
         if kind.is_symlink() {
             ensure!(
                 !rel.extension().is_some_and(|e| e == "ncl"),
-                "Lien interdit dans les modules Nickel"
+                "Symlinks are not allowed in Nickel modules"
             );
             // Never follow links. An import through an omitted directory cannot resolve in /config.
             continue;
@@ -65,21 +65,21 @@ fn modules(
             let child = files::open_child(dir, &name, true)?;
             modules(&child, &rel, destination, hashes, count, bytes, depth + 1)?;
         } else if rel.extension().is_some_and(|e| e == "ncl") {
-            ensure!(hashes.len() < 100, "Maximum 100 modules Nickel");
+            ensure!(hashes.len() < 100, "Maximum of 100 Nickel modules");
             let data = files::read_file(files::open_child(dir, &name, false)?, 1024 * 1024)?;
             *bytes += data.len();
-            ensure!(*bytes <= 16 * 1024 * 1024, "Modules Nickel trop volumineux");
+            ensure!(*bytes <= 16 * 1024 * 1024, "Nickel modules are too large");
             let target = destination.join(&rel);
             fs::create_dir_all(target.parent().ok_or_else(|| Error::InvalidPath {
                 path: target.clone(),
-                reason: "Parent absent",
+                reason: "Missing parent",
             })?)?;
             fs::write(target, &data)?;
             hashes.insert(
                 rel.to_str()
                     .ok_or_else(|| Error::InvalidPath {
                         path: rel.clone(),
-                        reason: "Chemin Nickel non UTF-8",
+                        reason: "Non-UTF-8 Nickel path",
                     })?
                     .into(),
                 files::hash(&data),
@@ -153,7 +153,7 @@ fn normalized_path(path: &Path, relative: bool) -> Result<()> {
                 .components()
                 .all(|component| matches!(component, Component::Normal(_) | Component::RootDir))
             && path.components().collect::<PathBuf>().as_os_str() == path.as_os_str(),
-        "Chemin Nickel non normalisé : {}",
+        "Nickel path is not normalized: {}",
         path.display()
     );
     Ok(())
@@ -176,7 +176,7 @@ struct LibraryBudget {
 fn stage_libraries(request: &BundleEvaluationRequest<'_>) -> Result<StagedLibraries> {
     ensure!(
         request.libraries.len() <= 8,
-        "Maximum 8 bibliothèques Nickel"
+        "Maximum of 8 Nickel libraries"
     );
     let mut result = StagedLibraries {
         directory: tempfile::tempdir()?,
@@ -194,11 +194,11 @@ fn stage_libraries(request: &BundleEvaluationRequest<'_>) -> Result<StagedLibrar
                     .name
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'),
-            "Nom de bibliothèque Nickel invalide"
+            "Invalid Nickel library name"
         );
         ensure!(
             !result.hashes.contains_key(library.name),
-            "Bibliothèque Nickel dupliquée : {}",
+            "Duplicate Nickel library: {}",
             library.name
         );
         normalized_path(library.root, false)?;
@@ -220,17 +220,17 @@ fn stage_libraries(request: &BundleEvaluationRequest<'_>) -> Result<StagedLibrar
         normalized_path(contract.entry, true)?;
         ensure!(
             contract.entry.extension().is_some_and(|e| e == "ncl"),
-            "Contrat .ncl requis"
+            "A .ncl contract is required"
         );
         let name = contract.entry.to_str().ok_or_else(|| Error::InvalidPath {
             path: contract.entry.into(),
-            reason: "Chemin Nickel non UTF-8",
+            reason: "Non-UTF-8 Nickel path",
         })?;
         let hash = result
             .hashes
             .get(contract.library)
             .and_then(|hashes| hashes.get(name))
-            .ok_or_else(|| invalid("Contrat absent des bibliothèques Nickel".into()))?;
+            .ok_or_else(|| invalid("Contract missing from Nickel libraries".into()))?;
         result.contract = Some(
             Path::new("/libraries")
                 .join(contract.library)
@@ -249,24 +249,24 @@ fn library_modules(
     budget: &mut LibraryBudget,
     depth: usize,
 ) -> Result<()> {
-    ensure!(depth <= 32, "Bibliothèques Nickel trop imbriquées");
+    ensure!(depth <= 32, "Nickel library nesting limit exceeded");
     for entry in fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))? {
         let entry = entry?;
         budget.entries += 1;
         ensure!(
             budget.entries <= 4096,
-            "Maximum 4096 entrées de bibliothèques Nickel"
+            "Maximum of 4096 Nickel library entries"
         );
         let name = entry.file_name();
         let relative = relative.join(&name);
         let kind = entry.file_type()?;
         ensure!(
             !kind.is_symlink(),
-            "Lien interdit dans les bibliothèques Nickel"
+            "Symlinks are not allowed in Nickel libraries"
         );
         ensure!(
             kind.is_file() || kind.is_dir(),
-            "Type de fichier interdit dans les bibliothèques Nickel"
+            "File type not allowed in Nickel libraries"
         );
         if kind.is_dir() {
             let child = files::open_child(directory, &name, true)?;
@@ -275,22 +275,22 @@ fn library_modules(
             budget.modules += 1;
             ensure!(
                 budget.modules <= 2048,
-                "Maximum 2048 modules de bibliothèques Nickel"
+                "Maximum of 2048 Nickel library modules"
             );
             let data = files::read_file(files::open_child(directory, &name, false)?, 1024 * 1024)?;
             budget.bytes += data.len();
             ensure!(
                 budget.bytes <= 64 * 1024 * 1024,
-                "Bibliothèques Nickel trop volumineuses"
+                "Nickel libraries are too large"
             );
             let key = relative.to_str().ok_or_else(|| Error::InvalidPath {
                 path: relative.clone(),
-                reason: "Chemin Nickel non UTF-8",
+                reason: "Non-UTF-8 Nickel path",
             })?;
             let target = destination.join(&relative);
             fs::create_dir_all(target.parent().ok_or_else(|| Error::InvalidPath {
                 path: target.clone(),
-                reason: "Parent absent",
+                reason: "Missing parent",
             })?)?;
             fs::write(target, &data)?;
             hashes.insert(key.into(), files::hash(&data));
@@ -314,7 +314,7 @@ fn evaluate_with_libraries(
     let entry = request.entry;
     ensure!(
         entry.extension().is_some_and(|e| e == "ncl"),
-        "Fichier .ncl requis"
+        "A .ncl file is required"
     );
     let entry = files::absolute(entry)?;
     let _entry = files::open_regular(&entry)?;
@@ -343,12 +343,12 @@ fn evaluate_with_libraries(
     let store = store.trim();
     ensure!(
         store.starts_with("/nix/store/") && !store.contains('\n'),
-        "Chemin évaluateur invalide"
+        "Invalid evaluator path"
     );
     let binary = Path::new(store).join("bin/nickel");
     ensure!(
         binary.is_file(),
-        "Évaluateur absent : construire explicitement le paquet nix#nickel"
+        "Evaluator missing: explicitly build the nix#nickel package"
     );
     let mut query = Command::new("nix-store");
     query.args(["--query", "--requisites", store]);
@@ -360,7 +360,7 @@ fn evaluate_with_libraries(
     modules(
         &files::open_directory(entry.parent().ok_or_else(|| Error::InvalidPath {
             path: entry.clone(),
-            reason: "Parent absent",
+            reason: "Missing parent",
         })?)?,
         Path::new(""),
         &staged,
@@ -380,7 +380,7 @@ fn evaluate_with_libraries(
                             !name
                                 .to_str()
                                 .is_some_and(|name| libraries.hashes.contains_key(name)),
-                            "Module projet masquant une bibliothèque Nickel : {module}"
+                            "Project module shadows a Nickel library: {module}"
                         );
                     }
                 }
@@ -414,7 +414,7 @@ fn evaluate_with_libraries(
     for path in closure.lines() {
         ensure!(
             path.starts_with("/nix/store/") && Path::new(path).components().count() == 4,
-            "Fermeture Nix invalide"
+            "Invalid Nix closure"
         );
         cmd.args(["--ro-bind", path, path]);
     }
@@ -442,7 +442,7 @@ fn evaluate_with_libraries(
     cmd.arg(
         Path::new("/config").join(entry.file_name().ok_or_else(|| Error::InvalidPath {
             path: entry.clone(),
-            reason: "Nom absent",
+            reason: "Missing name",
         })?),
     );
     let output =
