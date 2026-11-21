@@ -77,6 +77,18 @@ pub trait Backend {
     fn kind(&self) -> BackendKind;
     /// Fingerprint the target and state binding, excluding credential values.
     fn fingerprint(&self) -> Result<String>;
+    /// Stable target identity, independent of Kubernetes trust and authentication.
+    fn target_identity(&self) -> Result<String> {
+        self.fingerprint()
+    }
+    /// Bind a prepared operation to the connection configuration actually in use.
+    fn execution_fingerprint(&self) -> Result<String> {
+        self.fingerprint()
+    }
+    /// Historical proof used only during an explicitly requested binding upgrade.
+    fn legacy_fingerprint(&self) -> Result<String> {
+        self.fingerprint()
+    }
     /// A bounded event hint. Errors trigger periodic resynchronization, never mutation.
     fn poll_events(&mut self, _inventory: &Value) -> Result<bool> {
         Ok(false)

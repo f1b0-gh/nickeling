@@ -6,6 +6,15 @@ use serde_json::{json, Value};
 use std::{collections::BTreeMap, os::unix::fs::MetadataExt, time::Duration};
 pub trait Api {
     fn request(&mut self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value)>;
+    fn validate_target(&self, _target: &KubernetesTarget) -> Result<()> {
+        Ok(())
+    }
+    fn execution_fingerprint(&self, target: &KubernetesTarget) -> Result<String> {
+        ConnectionSnapshot::read(target)?.fingerprint()
+    }
+    fn legacy_fingerprint(&self, target: &KubernetesTarget) -> Result<String> {
+        ConnectionSnapshot::read(target)?.legacy_fingerprint()
+    }
 }
 pub struct Kubernetes<A: Api> {
     pub api: A,
@@ -13,18 +22,110 @@ pub struct Kubernetes<A: Api> {
 }
 pub struct Http {
     agent: ureq::Agent,
-    server: String,
-    token_file: Option<std::path::PathBuf>,
+    snapshot: ConnectionSnapshot,
+}
+struct ConnectionSnapshot {
+    target: KubernetesTarget,
+    ca: Option<Vec<u8>>,
+    token: Option<String>,
+}
+impl ConnectionSnapshot {
+    fn read(target: &KubernetesTarget) -> Result<Self> {
+        let ca = target
+            .ca_file
+            .as_ref()
+            .map(|path| files::read_limited(path, 1024 * 1024))
+            .transpose()?;
+        let token = target
+            .token_file
+            .as_ref()
+            .map(|path| {
+                let opened = files::open_regular(path)?;
+                require(
+                    opened.metadata()?.mode() & 0o077 == 0,
+                    "Credential file must be private",
+                )?;
+                let token = String::from_utf8(files::read_file(opened, 64 * 1024)?)
+                    .map_err(|_| Error::Invalid("Invalid bearer token encoding".into()))?;
+                require(
+                    !token.trim().is_empty() && !token.trim().contains(['\r', '\n']),
+                    "Invalid bearer token",
+                )?;
+                Ok::<_, Error>(token)
+            })
+            .transpose()?;
+        Ok(Self {
+            target: target.clone(),
+            ca,
+            token,
+        })
+    }
+    fn validate(&self, target: &KubernetesTarget) -> Result<()> {
+        require(
+            self.target == *target,
+            "Kubernetes target changed; reconnect before continuing",
+        )?;
+        let current = Self::read(target)?;
+        require(
+            self.ca == current.ca && self.token == current.token,
+            "Kubernetes trust or credentials changed; reconnect before continuing",
+        )
+    }
+    fn fingerprint(&self) -> Result<String> {
+        let trust = if let Some(ca) = &self.ca {
+            json!({"mode":"explicit","sha256":files::hash(ca)})
+        } else {
+            // These are the same roots ureq's rustls connector uses for WebPki.
+            let anchors: Vec<_> = webpki_roots::TLS_SERVER_ROOTS
+                .iter()
+                .map(|root| {
+                    (
+                        root.subject.as_ref(),
+                        root.subject_public_key_info.as_ref(),
+                        root.name_constraints.as_ref().map(|value| value.as_ref()),
+                    )
+                })
+                .collect();
+            json!({"mode":"webpki","sha256":files::hash(&serde_json::to_vec(&anchors)?)})
+        };
+        Ok(files::hash(&serde_json::to_vec(&json!({
+            "domain":"nickel-plane/kubernetes-execution/v1",
+            "server":self.target.server,"namespace":self.target.namespace,
+            "allowHttpLoopback":self.target.allow_http_loopback,
+            "trust":trust,"token":self.token.as_ref().map(|token| files::hash(token.as_bytes()))
+        }))?))
+    }
+    fn legacy_fingerprint(&self) -> Result<String> {
+        Ok(files::hash(&serde_json::to_vec(&json!({
+            "server":self.target.server,"namespace":self.target.namespace,
+            "ca":self.ca.as_ref().map(|bytes| files::hash(bytes))
+        }))?))
+    }
 }
 impl Api for Http {
+    fn validate_target(&self, target: &KubernetesTarget) -> Result<()> {
+        self.snapshot.validate(target)
+    }
+    fn execution_fingerprint(&self, target: &KubernetesTarget) -> Result<String> {
+        self.snapshot.validate(target)?;
+        self.snapshot.fingerprint()
+    }
+    fn legacy_fingerprint(&self, target: &KubernetesTarget) -> Result<String> {
+        self.snapshot.validate(target)?;
+        self.snapshot.legacy_fingerprint()
+    }
     fn request(&mut self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value)> {
+        self.snapshot.validate(&self.snapshot.target)?;
         require(
             path.starts_with('/') && !path.starts_with("//"),
             "Invalid API path",
         )?;
         let mut request = ureq::http::Request::builder()
             .method(method)
-            .uri(format!("{}{path}", self.server))
+            .uri(format!(
+                "{}{path}",
+                self.snapshot.target.server.trim_end_matches('/')
+            ))
             .header("Accept", "application/json")
             .header(
                 "Content-Type",
@@ -34,18 +135,7 @@ impl Api for Http {
                     "application/json"
                 },
             );
-        if let Some(file) = &self.token_file {
-            let opened = files::open_regular(file)?;
-            require(
-                opened.metadata()?.mode() & 0o077 == 0,
-                "Credential file must be private",
-            )?;
-            let token = String::from_utf8(files::read_file(opened, 64 * 1024)?)
-                .map_err(|_| Error::Invalid("Invalid bearer token encoding".into()))?;
-            require(
-                !token.trim().is_empty() && !token.trim().contains(['\r', '\n']),
-                "Invalid bearer token",
-            )?;
+        if let Some(token) = &self.snapshot.token {
             request = request.header("Authorization", format!("Bearer {}", token.trim()));
         }
         let bytes = body
@@ -117,14 +207,14 @@ impl Kubernetes<Http> {
             && matches!(uri.host(), Some("127.0.0.1" | "[::1]"));
         require((uri.scheme_str()==Some("https")||local)&&!target.server.contains(['@','?','#'])&&matches!(uri.path(),""|"/"),"Kubernetes requires an explicit HTTPS server; HTTP is restricted to opted-in loopback fixtures")?;
         validate_name(&target.namespace)?;
+        let snapshot = ConnectionSnapshot::read(&target)?;
         let mut config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .max_redirects(0)
             .proxy(None)
             .timeout_global(Some(Duration::from_secs(30)));
-        if let Some(path) = &target.ca_file {
-            let bytes = files::read_limited(path, 1024 * 1024)?;
-            let cert = ureq::tls::Certificate::from_pem(&bytes)
+        if let Some(bytes) = &snapshot.ca {
+            let cert = ureq::tls::Certificate::from_pem(bytes)
                 .map_err(|_| Error::Invalid("Invalid Kubernetes CA certificate".into()))?;
             config = config.tls_config(
                 ureq::tls::TlsConfig::builder()
@@ -134,8 +224,7 @@ impl Kubernetes<Http> {
         }
         let api = Http {
             agent: config.build().new_agent(),
-            server: target.server.trim_end_matches('/').into(),
-            token_file: target.token_file.clone(),
+            snapshot,
         };
         Ok(Self { api, target })
     }
@@ -367,6 +456,7 @@ fn ready(object: &Value) -> Result<Readiness> {
 }
 impl<A: Api> Kubernetes<A> {
     fn get(&mut self, path: &str) -> Result<Option<Value>> {
+        self.api.validate_target(&self.target)?;
         let (status, value) = self.api.request("GET", path, None)?;
         match status {
             200 => Ok(Some(value)),
@@ -376,6 +466,7 @@ impl<A: Api> Kubernetes<A> {
         }
     }
     fn mutate(&mut self, method: &str, path: &str, body: &Value) -> Result<Value> {
+        self.api.validate_target(&self.target)?;
         let (status, value) = self.api.request(method, path, Some(body))?;
         match status {
             200..=299 => Ok(value),
@@ -414,17 +505,31 @@ impl<A: Api> Backend for Kubernetes<A> {
         BackendKind::Kubernetes
     }
     fn fingerprint(&self) -> Result<String> {
-        let ca = self
-            .target
-            .ca_file
-            .as_ref()
-            .map(|p| files::read_limited(p, 1024 * 1024).map(|b| files::hash(&b)))
-            .transpose()?;
-        Ok(files::hash(&serde_json::to_vec(
-            &json!({"server":self.target.server,"namespace":self.target.namespace,"ca":ca}),
-        )?))
+        self.api.validate_target(&self.target)?;
+        self.api.legacy_fingerprint(&self.target)
+    }
+    fn target_identity(&self) -> Result<String> {
+        self.api.validate_target(&self.target)?;
+        Ok(files::hash(&serde_json::to_vec(&json!({
+            "domain":"nickel-plane/kubernetes-target/v1",
+            "server":self.target.server,"namespace":self.target.namespace
+        }))?))
+    }
+    fn execution_fingerprint(&self) -> Result<String> {
+        self.api.execution_fingerprint(&self.target)
+    }
+    fn legacy_fingerprint(&self) -> Result<String> {
+        self.api.validate_target(&self.target)?;
+        let Some(path) = &self.target.previous_ca_file else {
+            return self.fingerprint();
+        };
+        let ca = files::hash(&files::read_limited(path, 1024 * 1024)?);
+        Ok(files::hash(&serde_json::to_vec(&json!({
+            "server":self.target.server,"namespace":self.target.namespace,"ca":ca
+        }))?))
     }
     fn poll_events(&mut self, value: &Value) -> Result<bool> {
+        self.api.validate_target(&self.target)?;
         // Watch one known object as a scheduling hint, bounded by server timeout.
         // Full periodic observation covers every object and missed/expired events.
         let entries = inventory(value)?;
@@ -455,6 +560,7 @@ impl<A: Api> Backend for Kubernetes<A> {
             .is_some_and(|a| a.iter().any(|e| e["type"] != "BOOKMARK")))
     }
     fn observe(&mut self, context: &Context) -> Result<Observation> {
+        self.api.validate_target(&self.target)?;
         let wanted = desired(context, &self.target.namespace)?;
         let previous = inventory(&context.inventory)?;
         let mut actual = BTreeMap::new();
@@ -584,7 +690,7 @@ impl<A: Api> Backend for Kubernetes<A> {
             operation: operation.into(),
             revision: context.revision.clone(),
             artifact_sha256: context.artifact_sha256.clone(),
-            target_sha256: self.fingerprint()?,
+            target_sha256: self.execution_fingerprint()?,
             summary,
             payload: json!({"actions":actions,"creates":creates}),
             preconditions: observed.preconditions.clone(),
@@ -598,7 +704,7 @@ impl<A: Api> Backend for Kubernetes<A> {
         require(
             change.revision == context.revision
                 && change.artifact_sha256 == context.artifact_sha256
-                && change.target_sha256 == self.fingerprint()?,
+                && change.target_sha256 == self.execution_fingerprint()?,
             "Stale Kubernetes change",
         )?;
         let observed = self.observe(context)?;

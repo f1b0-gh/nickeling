@@ -195,11 +195,44 @@ compaction/garbage collection and migration between state locations are deferred
 ## Backends
 
 Kubernetes targets require explicit HTTPS server, namespace and optional CA/
-private bearer-token file. Credentials are reread per request. Redirects, ambient
+private bearer-token file. Connections capture trust and credentials together;
+each request checks that their files still match. Changes require reconnection,
+which the service performs on its next cycle. Redirects, ambient
 proxies and credential exec plugins are disabled. HTTP requires an explicit
 loopback-fixture opt-in. Initial execution covers the supported namespaced kinds;
 cluster-scoped Namespace creation is deliberately unsupported. Rendering remains
 available independently.
+
+New unit state records a versioned target identity bound to server and namespace.
+CA and bearer-token rotation preserve that identity and recorded object UIDs,
+but invalidate prepared operations, including deletion plans. Plans bind the
+actual connection snapshot, including the built-in root certificates when no
+`caFile` is supplied. Reconnect, plan again and review a fresh operation after
+rotation; an existing connection refuses changes to its files or target.
+
+Older unit state contains only a fingerprint that includes the CA. It retains
+that check until an explicit upgrade. Run `plan --upgrade-target-bindings` with
+the usual runtime arguments before rotating: the controller records the stable
+identity only after the old fingerprint matches exactly and observation succeeds.
+The original fingerprint, owner, inventory and operation history remain intact.
+Legacy prepared operations must be replanned. If the old target has exhausted
+its retry budget, also pass `--retry-failed`.
+
+If rotation already happened, set the target's optional `previousCaFile` to the
+old CA file and use `--upgrade-target-bindings`. This file is bounded, read without
+following symlinks, and used only to prove the historical fingerprint; it never
+supplies TLS roots. The active `caFile` must still authenticate the live API.
+A different server, namespace, incorrect old CA or unknown binding version is
+refused. Without the exact old proof, an already-rotated legacy target requires
+an explicit migration that is not implemented. Never delete or rewrite ownership
+state to bypass this refusal. After upgrade, `previousCaFile` can be removed from
+the target configuration on the next connection.
+
+The proof field cannot represent a historical `caFile=null`. If a legacy target
+used built-in roots, upgrade its binding before switching to an explicit CA file.
+An already-changed legacy target in that situation cannot use this proof mechanism;
+restore its original trust configuration for a verified upgrade, or wait for an
+explicit migration facility. The controller does not guess the old trust mode.
 
 New objects use POST; existing owned objects use server-side apply without
 force, bound to UID and resourceVersion. This avoids accidental adoption on

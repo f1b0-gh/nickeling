@@ -10,6 +10,12 @@ Evaluation and native tests require Linux, Nix, Bubblewrap, `prlimit` and
 unprivileged user namespaces. The pinned flakes target x86_64 Linux. Acquiring
 the tools is an explicit step, separate from compilation and offline validation.
 
+The Kubernetes TLS fixtures also require OpenSSL on `PATH` and permission to
+bind loopback sockets. The pinned `nickel-plane` and `nickel-tf` default
+development shells include OpenSSL; CI uses the latter shell. These tests launch
+temporary local servers using synthetic test certificates and keys, and stop
+them when the fixture exits. They never use host credentials or a live cluster.
+
 ```sh
 nix --extra-experimental-features 'nix-command flakes' build \
   path:./crates/nickel-tf#nickel \
