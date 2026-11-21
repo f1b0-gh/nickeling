@@ -128,9 +128,9 @@ installation you need; Cargo builds its required Rust libraries automatically.
 | Kubernetes-only controller | `cargo install --path crates/nickel-plane --locked --no-default-features --features cli,kubernetes` |
 | OpenTofu-only controller | `cargo install --path crates/nickel-plane --locked --no-default-features --features cli,opentofu` |
 
-After the first crates.io release, the equivalent registry command is
+Version 0.1.0 is available on crates.io. The equivalent registry command is
 `cargo install nickel-k8s --version 0.1.0 --locked` (or `nickel-tf` / `nickel-plane`).
-The same feature selections apply. Rust consumers can then use
+The same feature selections apply. Rust consumers can use
 `nickel-util = "=0.1.0"`; see the [resource installation guide](docs/development.md#cli-installation-and-resources)
 for resources from the versioned crate archives.
 
@@ -139,14 +139,16 @@ for resources from the versioned crate archives.
 compiler depends on `nickel-util`; the controller includes only the compilers
 for its enabled adapters. See the [standalone library example](crates/nickel-util/README.md#usage).
 
-These commands install the selected executable. Keep the matching checkout for its `nickel/`,
+These commands install the selected executable. Keep the matching checkout or
+extract the versioned crate archive for its `nickel/`,
 `flake.nix` and `flake.lock` resources, and pass the crate directory as
 `--resources`. The OpenTofu compiler also needs an explicitly prepared schema
 bundle. Resource directories contain trusted code; project configuration is
 evaluated separately in confinement.
 
-All four components can also be used as Rust libraries. Pin the Git source to a
-reviewed full commit and set `default-features = false` for `nickel-k8s`,
+All four components can also be used as Rust libraries. Select version `=0.1.0`
+from crates.io, or pin the Git source to a reviewed full commit. Set
+`default-features = false` for `nickel-k8s`,
 `nickel-tf` and `nickel-plane` to omit their CLI dependencies. For `nickel-plane`,
 select `features = ["kubernetes"]`, `features = ["opentofu"]`, or both; neither
 adapter is included with default features disabled unless explicitly selected.

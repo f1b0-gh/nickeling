@@ -22,14 +22,14 @@ and `/proc/self/fd`.
 The package has no CLI feature and does not depend on Clap or any other
 Nickeling crate. It is a library, so `cargo install` does not apply.
 
-After version 0.1.0 is published on crates.io, add:
+Add version 0.1.0 from crates.io:
 
 ```toml
 [dependencies]
 nickel-util = "=0.1.0"
 ```
 
-Before publication, use the Git source pinned to a reviewed full commit:
+Alternatively, use the Git source pinned to a reviewed full commit:
 
 ```toml
 [dependencies.nickel-util]
