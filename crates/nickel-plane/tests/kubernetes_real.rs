@@ -1,6 +1,8 @@
 //! Real API semantics; invoked only by scripts/test-kind.py in its owned cluster.
 #![cfg(feature = "kubernetes")]
 
+#[path = "fixtures/kubernetes_legacy.rs"]
+mod legacy;
 use nickel_plane::{
     adapters::kubernetes::{Api, Http, Kubernetes},
     backend::{Backend, Context, Readiness},
@@ -54,6 +56,7 @@ fn context(name: &str, artifact: Value) -> Result<Context> {
         artifact_sha256: "one".into(),
         inventory: Value::Null,
         interrupted: None,
+        recovery: None,
         work: PathBuf::from(env::var("NICKELING_KIND_FIXTURE").unwrap_or_default()),
         engine_version: None,
         provider_lock: None,
@@ -69,13 +72,13 @@ fn real_controller_create_update_and_omission() -> Result<()> {
         json!({"apiVersion":"v1","kind":"List","items":[object("controller")]}),
     )?;
     let observed = k.observe(&c)?;
-    let create = k.prepare_change(&c, &observed, "create")?;
+    let create = legacy::prepare(&mut k, &c, &observed, "create")?;
     c.inventory = k.execute_change(&c, &create)?.inventory;
     c.artifact["items"][0]["data"]["value"] = json!("two");
     c.artifact_sha256 = "two".into();
     let observed = k.observe(&c)?;
     assert!(observed.drifted);
-    let stale = k.prepare_change(&c, &observed, "stale-transfer")?;
+    let stale = legacy::prepare(&mut k, &c, &observed, "stale-transfer")?;
     assert_eq!(stale.summary.field_ownership_transfers, 1);
     let route = "/api/v1/namespaces/nickeling-api/configmaps/controller";
     let foreign = json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{
@@ -101,7 +104,7 @@ fn real_controller_create_update_and_omission() -> Result<()> {
     assert!(!foreign_fields(&before).is_empty());
 
     let observed = k.observe(&c)?;
-    let transfer = k.prepare_change(&c, &observed, "transfer")?;
+    let transfer = legacy::prepare(&mut k, &c, &observed, "transfer")?;
     assert_eq!(transfer.summary.field_ownership_transfers, 1);
     assert_eq!(
         transfer.summary.updates + transfer.summary.creates + transfer.summary.deletes,
@@ -117,7 +120,7 @@ fn real_controller_create_update_and_omission() -> Result<()> {
     assert_eq!(foreign_fields(&before), foreign_fields(&after_transfer));
 
     let observed = k.observe(&c)?;
-    let update = k.prepare_change(&c, &observed, "update")?;
+    let update = legacy::prepare(&mut k, &c, &observed, "update")?;
     assert_eq!(update.summary.field_ownership_transfers, 0);
     assert_eq!(update.summary.updates, 1);
     c.inventory = k.execute_change(&c, &update)?.inventory;
@@ -127,7 +130,7 @@ fn real_controller_create_update_and_omission() -> Result<()> {
         .remove("remove");
     c.artifact_sha256 = "three".into();
     let observed = k.observe(&c)?;
-    let omit = k.prepare_change(&c, &observed, "omit")?;
+    let omit = legacy::prepare(&mut k, &c, &observed, "omit")?;
     c.inventory = k.execute_change(&c, &omit)?.inventory;
     let (_, actual) = k.api.request(
         "GET",
@@ -154,7 +157,7 @@ fn real_controller_omission_only_stays_pending_until_fresh_apply() -> Result<()>
         json!({"apiVersion":"v1","kind":"List","items":[object("omission-only")]}),
     )?;
     let observed = k.observe(&c)?;
-    let create = k.prepare_change(&c, &observed, "omission-create")?;
+    let create = legacy::prepare(&mut k, &c, &observed, "omission-create")?;
     c.inventory = k.execute_change(&c, &create)?.inventory;
     c.artifact["items"][0]["data"]
         .as_object_mut()
@@ -162,7 +165,7 @@ fn real_controller_omission_only_stays_pending_until_fresh_apply() -> Result<()>
         .remove("remove");
     c.artifact_sha256 = "omit-only".into();
     let observed = k.observe(&c)?;
-    let transfer = k.prepare_change(&c, &observed, "omission-transfer")?;
+    let transfer = legacy::prepare(&mut k, &c, &observed, "omission-transfer")?;
     assert_eq!(transfer.summary.field_ownership_transfers, 1);
     let pending = k.execute_change(&c, &transfer)?;
     assert!(pending.drifted);
@@ -173,7 +176,7 @@ fn real_controller_omission_only_stays_pending_until_fresh_apply() -> Result<()>
     assert_eq!(still_present["data"]["remove"], "old");
     let observed = k.observe(&c)?;
     assert!(observed.drifted);
-    let apply = k.prepare_change(&c, &observed, "omission-apply")?;
+    let apply = legacy::prepare(&mut k, &c, &observed, "omission-apply")?;
     assert_eq!(apply.summary.field_ownership_transfers, 0);
     assert_eq!(apply.summary.updates, 1);
     let complete = k.execute_change(&c, &apply)?;
@@ -194,7 +197,7 @@ fn real_controller_refuses_foreign_create_race() -> Result<()> {
         json!({"apiVersion":"v1","kind":"List","items":[object("race")]}),
     )?;
     let observed = k.observe(&race)?;
-    let plan = k.prepare_change(&race, &observed, "race-create")?;
+    let plan = legacy::prepare(&mut k, &race, &observed, "race-create")?;
     let (code, foreign) = k.api.request(
         "POST",
         "/api/v1/namespaces/nickeling-api/configmaps",
@@ -223,7 +226,7 @@ fn real_controller_refuses_replacement_uid_even_with_copied_owner_label() -> Res
         json!({"apiVersion":"v1","kind":"List","items":[object("replacement")]}),
     )?;
     let observed = k.observe(&c)?;
-    let plan = k.prepare_change(&c, &observed, "create-replacement")?;
+    let plan = legacy::prepare(&mut k, &c, &observed, "create-replacement")?;
     c.inventory = k.execute_change(&c, &plan)?.inventory;
     let path = "/api/v1/namespaces/nickeling-api/configmaps/replacement";
     let (_, original) = k.api.request("GET", path, None)?;
@@ -261,9 +264,7 @@ fn real_controller_recognizes_normalized_cpu_quantity_without_permanent_drift() 
         "quantity",
         json!({"apiVersion":"v1","kind":"List","items":[deployment]}),
     )?;
-    let observed = k.observe(&c)?;
-    let plan = k.prepare_change(&c, &observed, "quantity-create")?;
-    c.inventory = k.execute_change(&c, &plan)?.inventory;
+    compound::create_context(&mut c)?;
     let (_, actual) = k.api.request(
         "GET",
         "/apis/apps/v1/namespaces/nickeling-api/deployments/quantity",
@@ -342,10 +343,7 @@ fn create_and_check_storage(
     route: &str,
     paths: &[&str],
 ) -> Result<Value> {
-    let observed = k.observe(c)?;
-    let plan = k.prepare_change(c, &observed, "storage-create")?;
-    assert_eq!(plan.summary.creates, 1);
-    c.inventory = k.execute_change(c, &plan)?.inventory;
+    compound::create_context(c)?;
     let (status, actual) = k.api.request("GET", route, None)?;
     assert_eq!(status, 200);
     for path in paths {
@@ -404,7 +402,7 @@ fn real_controller_recognizes_and_updates_deployment_storage_quantities() -> Res
     let route = "/apis/apps/v1/namespaces/nickeling-api/deployments/quantity-deployment";
     let actual = create_and_check_storage(&mut k, &mut c, route, WORKLOAD_STORAGE_PATHS)?;
     assert_canonical_cpu_memory(&actual);
-    // Wait for the initial Deployment status write before freezing handoff preconditions.
+    // Wait for the initial Deployment status write before freezing update preconditions.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let observed = k.observe(&c)?;
@@ -423,19 +421,6 @@ fn real_controller_recognizes_and_updates_deployment_storage_quantities() -> Res
     c.artifact_sha256 = "emptydir-size-change".into();
     let observed = k.observe(&c)?;
     assert!(observed.drifted);
-    let transfer = k.prepare_change(&c, &observed, "storage-transfer")?;
-    assert_eq!(transfer.summary.field_ownership_transfers, 1);
-    assert_eq!(transfer.summary.updates, 0);
-    let pending = k.execute_change(&c, &transfer)?;
-    assert!(pending.drifted);
-    assert_eq!(pending.readiness, Readiness::NotReady);
-    c.inventory = pending.inventory;
-    let (_, transferred) = k.api.request("GET", route, None)?;
-    assert_eq!(
-        actual["spec"], transferred["spec"],
-        "Ownership transfer must not change workload fields"
-    );
-    let observed = k.observe(&c)?;
     let update = k.prepare_change(&c, &observed, "storage-update")?;
     assert_eq!(update.summary.field_ownership_transfers, 0);
     assert_eq!(update.summary.updates, 1);
@@ -478,3 +463,6 @@ fn real_controller_recognizes_statefulset_storage_template_quantities() -> Resul
     );
     Ok(())
 }
+
+#[path = "fixtures/kubernetes_compound_real.rs"]
+mod compound;

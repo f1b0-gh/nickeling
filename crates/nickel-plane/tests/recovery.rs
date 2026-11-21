@@ -259,3 +259,109 @@ fn store_rejects_links_public_permissions_and_unrelated_databases() -> Result<()
     assert!(Store::open(&private).is_err());
     Ok(())
 }
+
+struct Durable {
+    base: Fake,
+    recover_error: bool,
+}
+impl Backend for Durable {
+    fn kind(&self) -> BackendKind {
+        self.base.kind()
+    }
+    fn fingerprint(&self) -> Result<String> {
+        self.base.fingerprint()
+    }
+    fn observe(&mut self, c: &Context) -> Result<Observation> {
+        self.base.observe(c)
+    }
+    fn prepare_change(&mut self, c: &Context, o: &Observation, id: &str) -> Result<PreparedChange> {
+        self.base.prepare_change(c, o, id)
+    }
+    fn execute_change(&mut self, c: &Context, p: &PreparedChange) -> Result<Observation> {
+        self.base.execute_change(c, p)
+    }
+    fn execute_change_with_journal(
+        &mut self,
+        _c: &Context,
+        _p: &PreparedChange,
+        journal: &mut dyn OperationJournal,
+    ) -> Result<Observation> {
+        journal.guard()?;
+        journal.commit(
+            &json!({"uid":"response-uid"}),
+            0,
+            &json!({"uid":"response-uid"}),
+            None,
+        )?;
+        Err(Error::Backend(
+            "injected interruption after durable UID".into(),
+        ))
+    }
+    fn recover_change(
+        &mut self,
+        _c: &Context,
+        _p: &PreparedChange,
+        journal: &mut dyn OperationJournal,
+    ) -> Result<RecoveryDisposition> {
+        assert!(journal.guard().is_err(), "read recovery cannot mutate");
+        journal.commit(
+            &json!({"candidate":"candidate-uid"}),
+            1,
+            &json!({"uid":"response-uid"}),
+            Some(RecoveryReason::UnrecordedIdentity),
+        )?;
+        if self.recover_error {
+            return Err(Error::Backend("injected later read failure".into()));
+        }
+        Ok(RecoveryDisposition::ReviewRequired(
+            RecoveryReason::UnrecordedIdentity,
+        ))
+    }
+}
+fn durable_registry(remote: Arc<Mutex<Remote>>, recover_error: bool) -> Registry {
+    BTreeMap::from([(
+        "local".into(),
+        Box::new(Durable {
+            base: Fake { remote },
+            recover_error,
+        }) as Box<dyn Backend>,
+    )])
+}
+#[test]
+fn durable_evidence_survives_execution_and_later_recovery_errors() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut store = Store::open(&dir.path().join("store"))?;
+    let c = compiled(true)?;
+    store.submit(&c)?;
+    let remote = Arc::new(Mutex::new(Remote::default()));
+    reconcile(
+        &mut store,
+        &c,
+        &Validate,
+        &mut durable_registry(remote.clone(), true),
+        &Options::default(),
+    )?;
+    let state = store
+        .unit("demo", "first")?
+        .ok_or_else(|| Error::Invalid("missing state".into()))?;
+    assert_eq!(state.inventory, json!({"uid":"response-uid"}));
+    assert!(store.running("demo", "first")?.is_some());
+    // Recovery runs despite the ordinary backoff deadline, and its first commit
+    // remains durable when a later independent read fails.
+    reconcile(
+        &mut store,
+        &c,
+        &Validate,
+        &mut durable_registry(remote, true),
+        &Options {
+            execute: false,
+            ..Default::default()
+        },
+    )?;
+    let state = store
+        .unit("demo", "first")?
+        .ok_or_else(|| Error::Invalid("missing state".into()))?;
+    assert_eq!(state.inventory, json!({"uid":"response-uid"}));
+    assert_eq!(state.public()["recovery"]["reason"], "unrecordedIdentity");
+    Ok(())
+}

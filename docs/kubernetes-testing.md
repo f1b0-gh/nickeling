@@ -38,12 +38,23 @@ they require this explicitly provisioned cluster. Use `--filter TEST_NAME` for a
 focused run. These tests qualify local API behavior, not k3s, production
 availability, external networking, or workload deployment readiness.
 
+Compound-protocol fixtures use the actual Store/controller with real HTTP. They
+cover full creation plus metadata-only initialization, subsequent SSA changes and
+omissions, foreign ownership preservation, lost successful POST/PATCH responses,
+Store reopening, explicit unknown-UID binding, copied-marker replacement UIDs,
+creation races, stale concrete initializers and mixed deferred omissions.
+Mutation attempts are counted before forwarding, including rejected requests;
+binding asserts zero mutation attempts, including dry runs. Fault
+injection discards an actual successful API response; it does not simulate API
+field-manager semantics. Historical handoff fixtures remain separate.
+
 Storage fixtures cover PVC requests/limits, regular and init-container ephemeral
 storage, emptyDir limits, StatefulSet claim templates, and generic ephemeral
 volume claim templates. Each fixture checks the server's canonical quantity
 spelling and absence of false drift; a changed quantity must still report drift.
-A Deployment template update also exercises the separate ownership transfer and
-fresh server-side apply. Workloads have zero replicas, and claims explicitly use
+Storage and quantity fixtures create through the default durable Store/controller
+protocol; a Deployment template update then uses ordinary server-side apply.
+Separate historical fixtures exercise ownership handoff of legacy POST owners. Workloads have zero replicas, and claims explicitly use
 no StorageClass. The unbound PVC remains NotReady. These tests do not resize PVCs,
 update immutable StatefulSet claim templates, provision storage, or start Pods.
 Their service account gains only namespaced PVC and StatefulSet access.

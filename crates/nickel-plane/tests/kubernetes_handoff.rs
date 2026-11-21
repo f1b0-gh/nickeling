@@ -2,6 +2,8 @@
 //! independently exercised by the ignored kind tests in kubernetes_real.rs.
 #![cfg(feature = "kubernetes")]
 #![allow(clippy::unwrap_used)]
+#[path = "fixtures/kubernetes_legacy.rs"]
+mod legacy;
 use nickel_plane::{
     adapters::kubernetes::{Api, Kubernetes},
     backend::{Backend, Context, Readiness},
@@ -116,7 +118,7 @@ impl Api for FieldApi {
                 return Err(Error::Backend("Interrupted fixture response".into()));
             }
         }
-        Ok((200, result))
+        Ok((if method == "POST" { 201 } else { 200 }, result))
     }
 }
 fn fixture() -> Result<(Kubernetes<FieldApi>, Context)> {
@@ -133,6 +135,7 @@ fn fixture() -> Result<(Kubernetes<FieldApi>, Context)> {
         artifact_sha256: "one".into(),
         inventory: Value::Null,
         interrupted: None,
+        recovery: None,
         work: std::env::temp_dir(),
         engine_version: None,
         provider_lock: None,
@@ -149,7 +152,7 @@ fn fixture() -> Result<(Kubernetes<FieldApi>, Context)> {
         },
     };
     let observed = k.observe(&c)?;
-    let plan = k.prepare_change(&c, &observed, "create")?;
+    let plan = legacy::prepare(&mut k, &c, &observed, "create")?;
     c.inventory = k.execute_change(&c, &plan)?.inventory;
     let object = k.api.objects.get_mut(PATH).unwrap();
     object["data"]["foreign"] = json!("preserved");
@@ -173,7 +176,7 @@ fn transfer_is_separately_reviewed_and_pending_survives_until_apply() -> Result<
     let (mut k, mut c) = fixture()?;
     let before = k.api.objects[PATH].clone();
     let observed = k.observe(&c)?;
-    let transfer = k.prepare_change(&c, &observed, "transfer")?;
+    let transfer = legacy::prepare(&mut k, &c, &observed, "transfer")?;
     assert_eq!(
         serde_json::to_value(&transfer.summary)?["fieldOwnershipTransfers"],
         1
@@ -193,7 +196,7 @@ fn transfer_is_separately_reviewed_and_pending_survives_until_apply() -> Result<
     let restarted = k.observe(&c)?;
     assert!(restarted.drifted);
     assert_eq!(restarted.readiness, Readiness::NotReady);
-    let apply = k.prepare_change(&c, &restarted, "apply")?;
+    let apply = legacy::prepare(&mut k, &c, &restarted, "apply")?;
     assert_eq!(apply.summary.updates, 1);
     let done = k.execute_change(&c, &apply)?;
     assert!(!done.drifted);
@@ -209,7 +212,7 @@ fn transfer_is_separately_reviewed_and_pending_survives_until_apply() -> Result<
 fn interrupted_transfer_and_apply_recover_without_losing_pending_configuration() -> Result<()> {
     let (mut k, mut c) = fixture()?;
     let observed = k.observe(&c)?;
-    let transfer = k.prepare_change(&c, &observed, "transfer")?;
+    let transfer = legacy::prepare(&mut k, &c, &observed, "transfer")?;
     k.api.interrupt = true;
     assert!(k.execute_change(&c, &transfer).is_err());
     c.interrupted = Some(transfer);
@@ -219,7 +222,7 @@ fn interrupted_transfer_and_apply_recover_without_losing_pending_configuration()
     c.inventory = recovered.inventory;
     c.interrupted = None;
     let observed = k.observe(&c)?;
-    let apply = k.prepare_change(&c, &observed, "apply")?;
+    let apply = legacy::prepare(&mut k, &c, &observed, "apply")?;
     c.interrupted = Some(apply.clone());
     assert!(
         k.observe(&c)?.drifted,
@@ -243,7 +246,7 @@ fn interrupted_transfer_and_apply_recover_without_losing_pending_configuration()
 fn stale_transfer_and_ambiguous_managers_are_refused() -> Result<()> {
     let (mut k, c) = fixture()?;
     let observed = k.observe(&c)?;
-    let transfer = k.prepare_change(&c, &observed, "transfer")?;
+    let transfer = legacy::prepare(&mut k, &c, &observed, "transfer")?;
     k.api.objects.get_mut(PATH).unwrap()["metadata"]["resourceVersion"] = json!("changed");
     assert!(k.execute_change(&c, &transfer).is_err());
     assert_eq!(k.api.writes, 1);
@@ -280,7 +283,7 @@ fn partial_multi_object_handoff_retains_every_pending_apply() -> Result<()> {
     desired["metadata"]["name"] = json!("zzz");
     c.artifact["items"].as_array_mut().unwrap().push(desired);
     let observed = k.observe(&c)?;
-    let transfer = k.prepare_change(&c, &observed, "first-transfer")?;
+    let transfer = legacy::prepare(&mut k, &c, &observed, "first-transfer")?;
     assert_eq!(transfer.summary.field_ownership_transfers, 2);
     k.api.interrupt = true;
     assert!(k.execute_change(&c, &transfer).is_err());
@@ -299,14 +302,14 @@ fn partial_multi_object_handoff_retains_every_pending_apply() -> Result<()> {
         assert_eq!(c.inventory[path]["pendingApply"], true);
     }
     let observed = k.observe(&c)?;
-    let remaining = k.prepare_change(&c, &observed, "remaining-transfer")?;
+    let remaining = legacy::prepare(&mut k, &c, &observed, "remaining-transfer")?;
     assert_eq!(remaining.summary.field_ownership_transfers, 1);
     c.inventory = k.execute_change(&c, &remaining)?.inventory;
     for path in [PATH, second] {
         assert_eq!(c.inventory[path]["pendingApply"], true);
     }
     let observed = k.observe(&c)?;
-    let apply = k.prepare_change(&c, &observed, "apply-both")?;
+    let apply = legacy::prepare(&mut k, &c, &observed, "apply-both")?;
     assert_eq!(apply.summary.updates, 2);
     k.api.interrupt = true;
     assert!(k.execute_change(&c, &apply).is_err());
@@ -325,7 +328,7 @@ fn partial_multi_object_handoff_retains_every_pending_apply() -> Result<()> {
     c.inventory = recovered.inventory;
     c.interrupted = None;
     let observed = k.observe(&c)?;
-    let fresh = k.prepare_change(&c, &observed, "fresh-apply")?;
+    let fresh = legacy::prepare(&mut k, &c, &observed, "fresh-apply")?;
     let done = k.execute_change(&c, &fresh)?;
     assert!(!done.drifted);
     assert_eq!(done.readiness, Readiness::Ready);
@@ -339,7 +342,7 @@ fn partial_multi_object_handoff_retains_every_pending_apply() -> Result<()> {
 fn pending_configuration_does_not_prevent_explicit_removal() -> Result<()> {
     let (mut k, mut c) = fixture()?;
     let observed = k.observe(&c)?;
-    let transfer = k.prepare_change(&c, &observed, "transfer")?;
+    let transfer = legacy::prepare(&mut k, &c, &observed, "transfer")?;
     c.inventory = k.execute_change(&c, &transfer)?.inventory;
     assert_eq!(c.inventory[PATH]["pendingApply"], true);
     let observed = k.observe_removal(&c)?;
@@ -370,7 +373,7 @@ fn incompatible_ownership_and_unexpected_admission_changes_refuse_planning() -> 
         let before = k.api.objects[PATH].clone();
         let observed = k.observe(&c)?;
         assert!(
-            k.prepare_change(&c, &observed, "refused").is_err(),
+            legacy::prepare(&mut k, &c, &observed, "refused").is_err(),
             "{variant}"
         );
         assert_eq!(k.api.objects[PATH], before);
@@ -395,7 +398,7 @@ fn legacy_summary_remains_readable_without_transfer_count() -> Result<()> {
 fn unknown_or_null_plan_phase_is_refused_for_execution_and_recovery() -> Result<()> {
     let (mut k, mut c) = fixture()?;
     let observed = k.observe(&c)?;
-    let transfer = k.prepare_change(&c, &observed, "transfer")?;
+    let transfer = legacy::prepare(&mut k, &c, &observed, "transfer")?;
     let before = k.api.objects[PATH].clone();
     for phase in [json!("future-phase"), Value::Null, json!(42)] {
         let mut unknown = transfer.clone();

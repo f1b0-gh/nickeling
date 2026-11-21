@@ -4,6 +4,7 @@ use nickel_util::files;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, os::unix::fs::MetadataExt, time::Duration};
+mod creation;
 mod quantity;
 pub trait Api {
     fn request(&mut self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value)>;
@@ -244,6 +245,16 @@ struct Entry {
     missing: bool,
     #[serde(default)]
     pending_apply: bool,
+    #[serde(default)]
+    pending_initialization: bool,
+    #[serde(default)]
+    deferred_changes: bool,
+    #[serde(default)]
+    initialization_artifact_sha256: Option<String>,
+    #[serde(default)]
+    creation_operation: Option<String>,
+    #[serde(default)]
+    creation_fields_sha256: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -725,6 +736,21 @@ impl<A: Api> Backend for Kubernetes<A> {
                     name: text(&object, "/metadata/name")?.into(),
                     missing: false,
                     pending_apply,
+                    pending_initialization: previous
+                        .get(&path)
+                        .is_some_and(|entry| entry.pending_initialization),
+                    deferred_changes: previous
+                        .get(&path)
+                        .is_some_and(|entry| entry.deferred_changes),
+                    initialization_artifact_sha256: previous
+                        .get(&path)
+                        .and_then(|entry| entry.initialization_artifact_sha256.clone()),
+                    creation_operation: previous
+                        .get(&path)
+                        .and_then(|entry| entry.creation_operation.clone()),
+                    creation_fields_sha256: previous
+                        .get(&path)
+                        .and_then(|entry| entry.creation_fields_sha256.clone()),
                 };
                 preconditions.insert(
                     path.clone(),
@@ -732,9 +758,12 @@ impl<A: Api> Backend for Kubernetes<A> {
                 );
                 outputs["resources"][&entry.kind][&entry.name] = object.clone();
                 if let Some(want) = wanted.get(&path) {
-                    drifted |= entry.pending_apply || !subset(want, &object);
+                    drifted |= (entry.pending_apply || entry.pending_initialization)
+                        || !subset(want, &object);
                     let mut r = ready(&object)?;
-                    if entry.pending_apply && r != Readiness::Failed {
+                    if (entry.pending_apply || entry.pending_initialization)
+                        && r != Readiness::Failed
+                    {
                         r = Readiness::NotReady;
                     }
                     if r != Readiness::Ready && readiness != Readiness::Failed {
@@ -781,6 +810,9 @@ impl<A: Api> Backend for Kubernetes<A> {
         operation: &str,
     ) -> Result<PreparedChange> {
         self.api.validate_target(&self.target)?;
+        if let Some(change) = creation::prepare(self, context, observed, operation)? {
+            return Ok(change);
+        }
         let wanted = desired(context, &self.target.namespace)?;
         let old = inventory(&context.inventory)?;
         let present = inventory(&observed.inventory)?;
@@ -883,11 +915,39 @@ impl<A: Api> Backend for Kubernetes<A> {
             preconditions: observed.preconditions.clone(),
         })
     }
+    fn recover_change(
+        &mut self,
+        context: &Context,
+        change: &PreparedChange,
+        journal: &mut dyn OperationJournal,
+    ) -> Result<RecoveryDisposition> {
+        if creation::handles(change) {
+            creation::recover(self, context, change, journal)
+        } else {
+            Ok(RecoveryDisposition::Legacy)
+        }
+    }
+    fn execute_change_with_journal(
+        &mut self,
+        context: &Context,
+        change: &PreparedChange,
+        journal: &mut dyn OperationJournal,
+    ) -> Result<Observation> {
+        if creation::handles(change) {
+            creation::execute(self, context, change, journal)
+        } else {
+            self.execute_change(context, change)
+        }
+    }
     fn execute_change(
         &mut self,
         context: &Context,
         change: &PreparedChange,
     ) -> Result<Observation> {
+        require(
+            !creation::handles(change),
+            "Compound creation requires a durable operation journal",
+        )?;
         let transfer = is_transfer(change)?;
         require(
             change.revision == context.revision
@@ -946,6 +1006,11 @@ impl<A: Api> Backend for Kubernetes<A> {
                     name: name.into(),
                     missing: false,
                     pending_apply: transfer,
+                    pending_initialization: false,
+                    deferred_changes: false,
+                    initialization_artifact_sha256: None,
+                    creation_operation: None,
+                    creation_fields_sha256: None,
                 },
             );
         }

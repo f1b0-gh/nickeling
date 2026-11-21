@@ -13,6 +13,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(crate) mod operations;
+
 pub struct Store {
     connection: Connection,
     directory: File,
@@ -103,6 +105,7 @@ impl Store {
    CREATE TABLE IF NOT EXISTS instances (id TEXT PRIMARY KEY,revision TEXT NOT NULL,compiled TEXT NOT NULL,deleted INTEGER NOT NULL DEFAULT 0);
    CREATE TABLE IF NOT EXISTS units (instance TEXT NOT NULL,unit TEXT NOT NULL,state TEXT NOT NULL,PRIMARY KEY(instance,unit));
    CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY,instance TEXT NOT NULL,unit TEXT NOT NULL,revision TEXT NOT NULL,phase TEXT NOT NULL,change TEXT NOT NULL);
+   CREATE INDEX IF NOT EXISTS operations_recovery ON operations(instance,unit,phase) WHERE phase IN ('running','review-required','superseded-unresolved');
    CREATE TABLE IF NOT EXISTS bindings (binding TEXT PRIMARY KEY,instance TEXT NOT NULL,unit TEXT NOT NULL);
    INSERT OR IGNORE INTO metadata VALUES('owner',lower(hex(randomblob(16)))); PRAGMA user_version=1;")?;
         let owner =
@@ -163,13 +166,15 @@ impl Store {
         Ok(result)
     }
     pub fn ensure_revision(&self, id: &str, revision: &str) -> Result<()> {
-        let actual: String =
-            self.connection
-                .query_row("SELECT revision FROM instances WHERE id=?1", [id], |r| {
-                    r.get(0)
-                })?;
-        if actual != revision {
-            return Err(Error::Conflict("Desired revision was superseded".into()));
+        let matches: bool = self.connection.query_row(
+            "SELECT length(CAST(revision AS BLOB))<=256 AND revision=?2 FROM instances WHERE id=?1",
+            params![id, revision],
+            |row| row.get(0),
+        )?;
+        if !matches {
+            return Err(Error::Conflict(
+                "Desired revision was superseded or exceeds its byte budget".into(),
+            ));
         }
         Ok(())
     }
@@ -196,16 +201,7 @@ impl Store {
         Ok(())
     }
     pub fn unit(&self, instance: &str, unit: &str) -> Result<Option<UnitState>> {
-        let data: Option<String> = self
-            .connection
-            .query_row(
-                "SELECT state FROM units WHERE instance=?1 AND unit=?2",
-                params![instance, unit],
-                |r| r.get(0),
-            )
-            .optional()?;
-        data.map(|data| serde_json::from_str(&data).map_err(Error::from))
-            .transpose()
+        self.unit_snapshot(instance, unit)
     }
     pub fn units(&self, instance: &str) -> Result<BTreeMap<String, UnitState>> {
         let mut statement = self
@@ -234,10 +230,67 @@ impl Store {
         phase: &str,
     ) -> Result<()> {
         self.ensure_revision(instance, &change.revision)?;
-        self.connection.execute("INSERT INTO operations VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET phase=excluded.phase",params![change.operation,instance,unit,change.revision,phase,serde_json::to_string(change)?])?;
+        require(
+            matches!(phase, "prepared" | "running"),
+            "Recovery phases require a journal transaction",
+        )?;
+        require(
+            change.operation.len() <= 256,
+            "Operation identifier exceeds its byte budget",
+        )?;
+        let data = operations::bounded_json(change, operations::APPROVAL_LIMIT)?;
+        operations::admit_phase(&self.connection, instance, unit, &change.operation, phase)?;
+        if let Some(existing) = self.operation_record(instance, unit, &change.operation)? {
+            require(
+                existing.change == *change,
+                "Cannot rebind an existing operation approval",
+            )?;
+            require(
+                existing.phase != "in-place-removal"
+                    && (existing.binding.is_none() || existing.phase == phase),
+                "Checkpointed operation transitions require a journal transaction",
+            )?;
+            self.connection.execute(
+                "UPDATE operations SET phase=?1 WHERE id=?2 AND instance=?3 AND unit=?4",
+                params![phase, change.operation, instance, unit],
+            )?;
+        } else {
+            self.connection.execute(
+                "INSERT INTO operations VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    change.operation,
+                    instance,
+                    unit,
+                    change.revision,
+                    phase,
+                    data
+                ],
+            )?;
+        }
         Ok(())
     }
     pub fn finish(&self, operation: &str, phase: &str) -> Result<()> {
+        require(
+            matches!(phase, "succeeded" | "recovered"),
+            "Legacy finalization requires a terminal phase",
+        )?;
+        let keys: Option<(Option<String>,Option<String>)> = self.connection.query_row(
+            "SELECT CASE WHEN length(CAST(instance AS BLOB))<=256 THEN instance ELSE NULL END,CASE WHEN length(CAST(unit AS BLOB))<=256 THEN unit ELSE NULL END FROM operations WHERE id=?1", [operation],
+            |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+        if let Some(keys) = keys {
+            let (Some(instance), Some(unit)) = keys else {
+                return Err(Error::Invalid(
+                    "Operation binding exceeds its byte budget".into(),
+                ));
+            };
+            let record = self
+                .operation_record(&instance, &unit, operation)?
+                .ok_or_else(|| Error::Conflict("Operation disappeared".into()))?;
+            require(
+                record.checkpoint.is_none() && record.phase != "in-place-removal",
+                "Checkpointed operation finalization requires a journal transaction",
+            )?;
+        }
         self.connection.execute(
             "UPDATE operations SET phase=?1 WHERE id=?2",
             params![phase, operation],
@@ -245,9 +298,9 @@ impl Store {
         Ok(())
     }
     pub fn running(&self, instance: &str, unit: &str) -> Result<Option<PreparedChange>> {
-        let data:Option<String>=self.connection.query_row("SELECT change FROM operations WHERE instance=?1 AND unit=?2 AND phase='running' ORDER BY rowid DESC LIMIT 1",params![instance,unit],|r|r.get(0)).optional()?;
-        data.map(|s| serde_json::from_str(&s).map_err(Error::from))
-            .transpose()
+        Ok(self
+            .running_record(instance, unit)?
+            .map(|record| record.change))
     }
     pub fn mark_removed(&self, id: &str, delete: bool) -> Result<()> {
         let compiled = self.load(id)?;
@@ -312,3 +365,6 @@ pub fn status(root: &Path, id: &str) -> Result<serde_json::Value> {
     }
     Ok(serde_json::json!({"instance":id,"revision":revision,"removal":removal,"units":units}))
 }
+
+#[cfg(test)]
+mod checkpoint_tests;

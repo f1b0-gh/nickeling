@@ -181,9 +181,7 @@ separate qualification.
 
 ## Project status
 
-Nickeling is under development at `0.1.0`. GitHub is the current publication target.
-Real Kubernetes operation and deployment on Scaleway still need validation.
-Crates.io publication is deferred until the intended workflows have been tested.
+Nickeling is under development at 0.1.0.
 
 ## Dependencies and security advisories
 

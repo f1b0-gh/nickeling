@@ -16,6 +16,8 @@ use std::{
         Arc,
     },
 };
+mod journal;
+
 pub type Registry = BTreeMap<String, Box<dyn Backend>>;
 pub struct Options {
     pub now: u64,
@@ -48,10 +50,25 @@ pub struct TargetBinding {
     pub version: u32,
     pub identity_sha256: String,
 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecoveryState {
+    pub source_operation: String,
+    pub reason: RecoveryReason,
+    pub outstanding_intents: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_operation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub removal_attempted: bool,
+}
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UnitState {
     pub revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<RecoveryState>,
     pub artifact_sha256: String,
     #[serde(default)]
     pub applied_sha256: String,
@@ -81,9 +98,9 @@ impl UnitState {
     pub fn public(&self) -> Value {
         json!({"revision":self.revision,"artifactSha256":self.artifact_sha256,
  "conditions":{"Rendered":self.rendered,"Applied":self.applied,"Ready":self.readiness==Readiness::Ready&&self.applied,"Drifted":self.drifted,"Failed":self.failure.is_some()},
- "readiness":self.readiness,"retained":self.retained,"deleted":self.deleted,"failure":self.failure,"waiting":self.waiting,"attempts":self.attempts,"nextRetry":self.next_retry,
+ "recovery":self.recovery,"readiness":self.readiness,"retained":self.retained,"deleted":self.deleted,"failure":self.failure,"waiting":self.waiting,"attempts":self.attempts,"nextRetry":self.next_retry,
  "outputs":self.outputs.iter().map(|(name,o)|(name.clone(),if o.sensitive{json!({"sensitive":true,"reference":o.reference})}else{json!({"sensitive":false,"value":o.value})})).collect::<BTreeMap<_,_>>(),
- "change":self.prepared.as_ref().map(|p|json!({"operation":p.operation,"revision":p.revision,"summary":p.summary}))})
+ "change":self.prepared.as_ref().map(|p|json!({"operation":p.operation,"revision":p.revision,"summary":p.summary,"recoveryBindings":p.recovery_bindings().ok()}))})
     }
     fn failed(&mut self, error: &Error, now: u64) {
         self.failure = Some(error.to_string());
@@ -235,6 +252,43 @@ pub fn reconcile(
         }
         let unit = &compiled.instance.units[&id];
         let mut state = store.unit(&compiled.instance.id, &id)?.unwrap_or_default();
+        let recovered = journal::recover_unit(store, compiled, &id, &mut state, backends, options);
+        let resuming = matches!(&recovered, Ok(Some(RecoveryDisposition::Resume)));
+        let mut recovering_review = false;
+        match recovered {
+            Ok(Some(RecoveryDisposition::ReviewRequired(reason))) => {
+                let identity_plan = options.approved_operation.as_ref().is_some_and(|id| {
+                    state.prepared.as_ref().is_some_and(|plan| {
+                        &plan.operation == id && plan.summary.recovery_bindings > 0
+                    })
+                });
+                if reason == RecoveryReason::UnrecordedIdentity || identity_plan {
+                    if let Err(error) =
+                        journal::review(store, compiled, &id, &mut state, backends, options)
+                    {
+                        state.failed(&error, options.now);
+                    }
+                    store.save_unit(&compiled.instance.id, &id, &state)?;
+                    continue;
+                }
+                if !options.prepare && options.approved_operation.is_none() {
+                    store.save_unit(&compiled.instance.id, &id, &state)?;
+                    continue;
+                }
+                recovering_review = true;
+            }
+            Ok(Some(RecoveryDisposition::Complete)) => {
+                store.save_unit(&compiled.instance.id, &id, &state)?;
+                continue;
+            }
+            Err(error) => {
+                state.revision = compiled.revision.clone();
+                state.failed(&error, options.now);
+                store.save_unit(&compiled.instance.id, &id, &state)?;
+                continue;
+            }
+            _ => {}
+        }
         if state.revision != compiled.revision {
             state.revision = compiled.revision.clone();
             state.applied = false;
@@ -248,7 +302,19 @@ pub fn reconcile(
             state.attempts = 0;
             state.next_retry = 0;
         }
-        if (!options.continuous_retry && state.attempts >= 5) || state.next_retry > options.now {
+        let explicit_resume = resuming
+            && (options.prepare
+                || match &options.approved_operation {
+                    Some(selected) => store
+                        .running(&compiled.instance.id, &id)?
+                        .is_some_and(|running| &running.operation == selected),
+                    None => false,
+                });
+        if !recovering_review
+            && !explicit_resume
+            && ((!options.continuous_retry && state.attempts >= 5)
+                || state.next_retry > options.now)
+        {
             continue;
         }
         let result = (|| -> Result<()> {
@@ -287,14 +353,80 @@ pub fn reconcile(
                 artifact: effective.artifact.clone(),
                 artifact_sha256: artifact_sha256.clone(),
                 inventory: state.inventory.clone(),
-                interrupted: running.clone(),
+                interrupted: if resuming || recovering_review {
+                    None
+                } else {
+                    running.clone()
+                },
+                recovery: None,
                 work: store.work(&compiled.instance.id, &id)?,
                 engine_version: effective.engine_version.clone(),
                 provider_lock: effective.provider_lock.clone().map(String::into_bytes),
             };
-            let observed = backend.observe(&context)?;
             checked_target.record(&mut state);
-            if let Some(interrupted) = running {
+            if resuming {
+                let change = running
+                    .as_ref()
+                    .ok_or_else(|| Error::Conflict("Resumable operation disappeared".into()))?;
+                if !options.execute || compiled.instance.policy.mode != Management::Manage {
+                    return Ok(());
+                }
+                require(
+                    options
+                        .approved_operation
+                        .as_ref()
+                        .is_none_or(|id| id == &change.operation),
+                    "A different operation was selected",
+                )?;
+                require(
+                    change.revision == compiled.revision
+                        && change.artifact_sha256 == context.artifact_sha256
+                        && change.target_sha256 == target_sha256,
+                    "Resumable operation authority changed; prepare a fresh recovery plan",
+                )?;
+                require(
+                    change.summary.replacements == 0 || compiled.instance.policy.allow_replace,
+                    "Policy denies replacement",
+                )?;
+                state.definition = Some(unit.clone());
+                state.effective = Some(effective);
+                state.artifact_sha256 = context.artifact_sha256.clone();
+                store.save_unit(&compiled.instance.id, &id, &state)?;
+                let after = {
+                    let mut journal = journal::Journal::execution(
+                        store,
+                        &mut state,
+                        &context,
+                        change,
+                        backend.as_ref(),
+                        options,
+                    )?;
+                    backend.execute_change_with_journal(&context, change, &mut journal)?
+                };
+                accept_observation(&mut state, after);
+                if change.summary.deferred_changes || state.recovery.is_some() {
+                    state.applied = false;
+                    state.readiness = Readiness::NotReady;
+                    state.drifted = true;
+                    state.outputs.clear();
+                } else {
+                    state.applied_sha256 = context.artifact_sha256.clone();
+                }
+                state.prepared = None;
+                state.attempts = 0;
+                state.next_retry = 0;
+                journal::finish(
+                    store,
+                    &compiled.instance.id,
+                    &id,
+                    &mut state,
+                    &change.operation,
+                    "succeeded",
+                )?;
+                return Ok(());
+            }
+            let observed = backend.observe(&context)?;
+            if let Some(interrupted) = running.filter(|_| !recovering_review) {
                 state.inventory = observed.inventory.clone();
                 // Persist recovered ownership before closing the recovery journal.
                 store.save_unit(&compiled.instance.id, &id, &state)?;
@@ -367,7 +499,11 @@ pub fn reconcile(
                         && prepared.target_sha256 == target_sha256,
                     "Backend returned an incorrectly bound plan",
                 )?;
-                store.record(&compiled.instance.id, &id, &prepared, "prepared")?;
+                if recovering_review {
+                    journal::associate(store, &compiled.instance.id, &id, &mut state, &prepared)?;
+                } else {
+                    store.record(&compiled.instance.id, &id, &prepared, "prepared")?;
+                }
                 prepared
             };
             state.prepared = Some(change.clone());
@@ -391,15 +527,42 @@ pub fn reconcile(
                 return Err(Error::Cancelled);
             }
             store.ensure_revision(&compiled.instance.id, &compiled.revision)?;
-            store.record(&compiled.instance.id, &id, &change, "running")?;
-            let after = backend.execute_change(&context, &change)?;
+            if recovering_review {
+                journal::begin_replacement(store, &compiled.instance.id, &id, &mut state, &change)?;
+            } else {
+                store.record(&compiled.instance.id, &id, &change, "running")?;
+            }
+            let after = {
+                let mut journal = journal::Journal::execution(
+                    store,
+                    &mut state,
+                    &context,
+                    &change,
+                    backend.as_ref(),
+                    options,
+                )?;
+                backend.execute_change_with_journal(&context, &change, &mut journal)?
+            };
             accept_observation(&mut state, after);
-            state.applied_sha256 = context.artifact_sha256.clone();
+            if change.summary.deferred_changes {
+                state.applied = false;
+                state.readiness = Readiness::NotReady;
+                state.drifted = true;
+                state.outputs.clear();
+            } else {
+                state.applied_sha256 = context.artifact_sha256.clone();
+            }
             state.prepared = None;
             state.attempts = 0;
             state.next_retry = 0;
-            store.save_unit(&compiled.instance.id, &id, &state)?;
-            store.finish(&change.operation, "succeeded")?;
+            journal::finish(
+                store,
+                &compiled.instance.id,
+                &id,
+                &mut state,
+                &change.operation,
+                "succeeded",
+            )?;
             Ok(())
         })();
         if let Err(error) = result {
@@ -468,7 +631,26 @@ fn remove_selected(
         let mut state = states
             .remove(&id)
             .ok_or_else(|| Error::Invalid("Missing removal state".into()))?;
-        if state.deleted {
+        // Read and commit unfinished creation evidence before deletion/retention
+        // shortcuts. A late unknown UID remains outside owned inventory.
+        let recovery = journal::recover_unit(store, compiled, &id, &mut state, backends, options);
+        match recovery {
+            Err(error) => {
+                state.revision = compiled.revision.clone();
+                state.failed(&error, options.now);
+                store.save_unit(&compiled.instance.id, &id, &state)?;
+                break;
+            }
+            Ok(Some(RecoveryDisposition::Resume)) => {
+                journal::stop_for_removal(store, compiled, &id, &mut state)?
+            }
+            _ => {}
+        }
+        let unresolved = journal::outstanding(store, &compiled.instance.id, &id)?;
+        if unresolved > 0 {
+            state.deleted = false;
+        }
+        if state.deleted && state.recovery.is_none() {
             continue;
         }
         let selected = options.approved_operation.as_ref().is_none_or(|operation| {
@@ -493,10 +675,39 @@ fn remove_selected(
         state.removing = true;
         state.applied = false;
         state.outputs.clear();
+        let recovering_review = state.recovery.is_some();
+        let identity_plan = options.approved_operation.as_ref().is_some_and(|id| {
+            state
+                .prepared
+                .as_ref()
+                .is_some_and(|plan| &plan.operation == id && plan.summary.recovery_bindings > 0)
+        });
+        if state
+            .recovery
+            .as_ref()
+            .is_some_and(|recovery| recovery.reason == RecoveryReason::UnrecordedIdentity)
+            || identity_plan
+        {
+            if let Err(error) = journal::review(store, compiled, &id, &mut state, backends, options)
+            {
+                state.failed(&error, options.now);
+            }
+            state.retained = !delete;
+            store.save_unit(&compiled.instance.id, &id, &state)?;
+            if delete {
+                break;
+            } else {
+                continue;
+            }
+        }
         if !delete {
             state.retained = !state.deleted;
             store.save_unit(&compiled.instance.id, &id, &state)?;
             continue;
+        }
+        if recovering_review && !options.prepare && options.approved_operation.is_none() {
+            store.save_unit(&compiled.instance.id, &id, &state)?;
+            break;
         }
         if options.cancelled.load(Ordering::SeqCst) {
             return Err(Error::Cancelled);
@@ -505,7 +716,10 @@ fn remove_selected(
             state.attempts = 0;
             state.next_retry = 0;
         }
-        if (!options.continuous_retry && state.attempts >= 5) || state.next_retry > options.now {
+        if !recovering_review
+            && ((!options.continuous_retry && state.attempts >= 5)
+                || state.next_retry > options.now)
+        {
             break;
         }
         let result = (|| -> Result<()> {
@@ -537,7 +751,12 @@ fn remove_selected(
                 artifact: artifact.artifact.clone(),
                 artifact_sha256: state.artifact_sha256.clone(),
                 inventory: state.inventory.clone(),
-                interrupted: store.running(&compiled.instance.id, &id)?,
+                interrupted: if recovering_review {
+                    None
+                } else {
+                    store.running(&compiled.instance.id, &id)?
+                },
+                recovery: None,
                 work: store.work(&compiled.instance.id, &id)?,
                 engine_version: artifact.engine_version.clone(),
                 provider_lock: artifact.provider_lock.clone().map(String::into_bytes),
@@ -553,7 +772,21 @@ fn remove_selected(
             if !observed.exists
                 && (options.approved_operation.is_none() || context.interrupted.is_some())
             {
-                state.deleted = true;
+                state.deleted = journal::outstanding(store, &compiled.instance.id, &id)? == 0;
+                if state.deleted {
+                    if let Some(recovery) = state.recovery.clone() {
+                        journal::finish(
+                            store,
+                            &compiled.instance.id,
+                            &id,
+                            &mut state,
+                            &recovery.source_operation,
+                            "recovered",
+                        )?;
+                    }
+                } else {
+                    state.waiting = Some("Waiting for unresolved creation recovery".into());
+                }
                 state.retained = false;
                 state.prepared = None;
                 state.failure = None;
@@ -585,7 +818,11 @@ fn remove_selected(
                         && prepared.target_sha256 == target_sha256,
                     "Backend returned an incorrectly bound removal plan",
                 )?;
-                store.record(&compiled.instance.id, &id, &prepared, "prepared")?;
+                if recovering_review {
+                    journal::associate(store, &compiled.instance.id, &id, &mut state, &prepared)?;
+                } else {
+                    store.record(&compiled.instance.id, &id, &prepared, "prepared")?;
+                }
                 prepared
             };
             state.prepared = Some(change.clone());
@@ -603,16 +840,28 @@ fn remove_selected(
                 return Err(Error::Cancelled);
             }
             store.ensure_revision(&compiled.instance.id, &compiled.revision)?;
-            store.record(&compiled.instance.id, &id, &change, "running")?;
+            if recovering_review {
+                journal::begin_removal(store, &compiled.instance.id, &id, &mut state, &change)?;
+            } else {
+                store.record(&compiled.instance.id, &id, &change, "running")?;
+            }
             let after = backend.execute_removal(&context, &change)?;
+            if recovering_review {
+                journal::finish_removal(store, &compiled.instance.id, &id, &mut state, after)?;
+                return Ok(());
+            }
             state.inventory = after.inventory;
             state.retained = after.exists;
-            state.deleted = !after.exists;
+            state.deleted =
+                !after.exists && journal::outstanding(store, &compiled.instance.id, &id)? == 0;
+            if !after.exists && !state.deleted {
+                state.waiting = Some("Waiting for unresolved creation recovery".into());
+            }
             state.failure = None;
             state.attempts = 0;
             state.next_retry = 0;
             store.save_unit(&compiled.instance.id, &id, &state)?;
-            if state.deleted {
+            if !after.exists {
                 state.prepared = None;
                 store.save_unit(&compiled.instance.id, &id, &state)?;
                 store.finish(&change.operation, "succeeded")?;
