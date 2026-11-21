@@ -4,6 +4,7 @@ use nickel_util::files;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, os::unix::fs::MetadataExt, time::Duration};
+mod quantity;
 pub trait Api {
     fn request(&mut self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value)>;
     fn validate_target(&self, _target: &KubernetesTarget) -> Result<()> {
@@ -376,7 +377,22 @@ fn subset(desired: &Value, actual: &Value) -> bool {
                         .enumerate()
                         .all(|(i, (a, b))| compare(a, b, &format!("{path}/{i}"), kind))
             }),
-            _ => want == have,
+            _ => {
+                if want == have {
+                    return true;
+                }
+                let want = match want {
+                    Value::String(value) => std::borrow::Cow::Borrowed(value.as_str()),
+                    Value::Number(value) => std::borrow::Cow::Owned(value.to_string()),
+                    _ => return false,
+                };
+                let have = match have {
+                    Value::String(value) => std::borrow::Cow::Borrowed(value.as_str()),
+                    Value::Number(value) => std::borrow::Cow::Owned(value.to_string()),
+                    _ => return false,
+                };
+                quantity::equivalent(kind, path, &want, &have)
+            }
         }
     }
     compare(
