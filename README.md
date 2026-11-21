@@ -1,12 +1,13 @@
 # Nickeling
 
-Reusable, contract-checked [Nickel](https://nickel-lang.org/) configuration for
-Kubernetes and OpenTofu.
+Composable [Nickel](https://nickel-lang.org/) configuration and reusable Rust
+building blocks for infrastructure tooling.
 
-Compose configuration with functions, validate it against pinned contracts or
-provider schemas, and render Kubernetes manifests or OpenTofu JSON. Use the
-compilers independently, or coordinate execution and dependencies with the
-optional `nickel-plane` controller.
+Use `nickel-util` to build tools that load, snapshot and evaluate configuration
+under explicit resource limits. Use the independent Kubernetes and OpenTofu
+compilers to turn checked configuration into manifests, or coordinate execution
+with the optional `nickel-plane` controller. Nix recipes package the controller
+and its engines as service containers.
 
 Nickel defines configuration, Rust provides the tools, and Nix supplies pinned
 engines and build recipes.
@@ -19,30 +20,55 @@ see what is shared, what differs and whether a change is valid.
 
 [Nickel](https://nickel-lang.org/) makes configuration programmable:
 
-- **Reuse with functions.** Define a resource or a group of resources once, then
-  pass parameters for each service or environment instead of copying manifests.
+- **Reuse with functions.** Define service settings, infrastructure resources or
+  image build profiles once, then pass parameters for each variant instead of
+  copying configuration.
 - **Compose small pieces.** Combine shared configuration, reusable libraries and
   application-specific settings into a complete configuration.
 - **Catch mistakes with contracts.** Check parameters and resource shapes before
   rendering. Nickeling supplies pinned Kubernetes contracts and OpenTofu provider
   schemas so validation covers the target configuration as well as your inputs.
 
-The result is ordinary Kubernetes JSON manifests or OpenTofu JSON configuration,
-usable by the existing tools. Nickel stays in the configuration layer; the
-optional controller handles execution. The example below defines a reusable
-ConfigMap function with typed parameters.
+The included compilers emit ordinary Kubernetes manifests or OpenTofu JSON,
+usable by existing tools. The same approach can provide checked inputs for your
+own build tooling. Nickel defines the configuration; consumers decide how to
+render it, build artifacts or execute changes.
 
 ## Choose a component
 
 | To… | Use… | Result |
 | --- | --- | --- |
+| Build configuration tooling | [nickel-util](crates/nickel-util/README.md) | Bounded files, snapshots, JSON, processes and confined evaluation |
 | Generate Kubernetes/k3s manifests | [nickel-k8s](crates/nickel-k8s/README.md) | A validated JSON `List` |
 | Generate OpenTofu configuration | [nickel-tf](crates/nickel-tf/README.md) | `.tf.json` checked against frozen provider schemas |
 | Coordinate execution and dependencies | [nickel-plane](crates/nickel-plane/README.md) | Plans, reconciliation and durable operation state |
-| Reuse the shared Rust primitives | [nickel-util](crates/nickel-util/README.md) | Bounded files, JSON, processes and confined evaluation |
+| Package the controller as a service | [Container recipes](crates/nickel-plane/containers/README.md) | systemd-nspawn rootfs, Podman images and Quadlet units |
 
 Both compilers work on their own. `nickel-plane` uses them through optional
 adapters; neither compiler depends on the controller.
+
+## Reuse nickel-util
+
+`nickel-util` is a library for configuration tool authors. It provides bounded
+file reads and safe publication, source snapshots and fingerprints, JSON
+structural checks, bounded subprocess I/O and confined Nickel evaluation. These
+primitives help make inputs reproducible and enforce limits before consuming or
+publishing data.
+
+Use it for application configuration, build profiles or other domain-specific
+tools: it has no Kubernetes or OpenTofu dependency and no CLI. File and JSON
+utilities can be used without running Nickel. Your tool owns its configuration
+model and execution policy; the library supplies the shared input-handling and
+evaluation machinery. See the [library guide](crates/nickel-util/README.md).
+
+## Container builds
+
+The included [container recipes](crates/nickel-plane/containers/README.md) combine
+a checked Nickel profile with pinned Nix packages to assemble a controller
+rootfs, including systemd, the selected engines and their resources. Build it
+for systemd-nspawn or package it as a Podman image with Quadlet units. Both
+OpenTofu-only and combined Kubernetes/OpenTofu variants are available; runtime
+state and credentials are supplied separately.
 
 ## Compose once, reuse with checked inputs
 
@@ -118,10 +144,6 @@ used to produce it.
 proposed operations; `apply` requires a specific operation and refuses stale
 plans. By default, an instance only observes resources and retains them when
 removed from management.
-
-The [container recipes](crates/nickel-plane/containers/README.md) package the
-controller as a systemd-nspawn rootfs or a Podman image with Quadlet units.
-These are service containers.
 
 The current Kubernetes contracts cover nine resource kinds; CRDs and Secret
 objects are rejected. OpenTofu compilation excludes modules and provisioners.
