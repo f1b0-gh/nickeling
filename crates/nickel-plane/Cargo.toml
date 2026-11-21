@@ -15,7 +15,7 @@ thiserror = "2"
 tempfile = "3"
 libc = "0.2"
 rusqlite = { version = "=0.43.0", features = ["bundled"] }
-ureq = { version = "=3.5.0", default-features = false, features = ["rustls", "json"], optional = true }
+ureq = { version = "=3.5.2", default-features = false, features = ["rustls", "json"], optional = true }
 nickel-tf = { path = "../nickel-tf", version = "=0.1.0", default-features = false, optional = true }
 nickel-k8s = { path = "../nickel-k8s", version = "=0.1.0", default-features = false, optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
