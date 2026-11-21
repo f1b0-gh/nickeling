@@ -153,7 +153,10 @@ pub fn read_limited(path: &Path, limit: usize) -> Result<Vec<u8>> {
     read_file(open_regular(path)?, limit)
 }
 pub fn hash(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn invalid(message: String) -> Error {
