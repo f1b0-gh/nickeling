@@ -69,6 +69,8 @@ jobs:
           cargo check --workspace --lib --no-default-features --locked
           cargo check -p nickel-plane --no-default-features --features cli,opentofu --locked
           cargo check -p nickel-plane --no-default-features --features cli,kubernetes --locked
+          for crate in crates/*; do cmp LICENSE "$crate/LICENSE"; done
+          cargo package --workspace --all-features --locked
           CHECKS
 
       - name: Check that validation preserved lockfiles

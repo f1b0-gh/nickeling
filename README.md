@@ -128,6 +128,12 @@ installation you need; Cargo builds its required Rust libraries automatically.
 | Kubernetes-only controller | `cargo install --path crates/nickel-plane --locked --no-default-features --features cli,kubernetes` |
 | OpenTofu-only controller | `cargo install --path crates/nickel-plane --locked --no-default-features --features cli,opentofu` |
 
+After the first crates.io release, the equivalent registry command is
+`cargo install nickel-k8s --version 0.1.0 --locked` (or `nickel-tf` / `nickel-plane`).
+The same feature selections apply. Rust consumers can then use
+`nickel-util = "=0.1.0"`; see the [resource installation guide](docs/development.md#cli-installation-and-resources)
+for resources from the versioned crate archives.
+
 `nickel-util` is a library, so use it as a Rust dependency rather than with
 `cargo install`. It has no dependency on the other Nickeling crates. Each
 compiler depends on `nickel-util`; the controller includes only the compilers

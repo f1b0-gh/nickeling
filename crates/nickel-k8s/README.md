@@ -6,8 +6,20 @@ The compiler turns a typed configuration into a Kubernetes JSON `List`, validate
 resources and locks its inputs. Kubernetes and k3s profiles share the same
 application modules. Compilation needs no cluster; deployment is a separate step.
 
-[Contracts and profiles](GUIDE.md) · [Examples](examples/) ·
-[Development](../../docs/development.md)
+[Contracts and profiles](https://github.com/f1b0-gh/nickeling/blob/main/crates/nickel-k8s/GUIDE.md) · [Examples](https://github.com/f1b0-gh/nickeling/blob/main/crates/nickel-k8s/examples) ·
+[Development](https://github.com/f1b0-gh/nickeling/blob/main/docs/development.md)
+
+## Install
+
+After version 0.1.0 is published on crates.io:
+
+```sh
+cargo install nickel-k8s --version 0.1.0 --locked
+```
+
+The executable needs matching trusted Nickel/Nix resources; see
+[resource installation](https://github.com/f1b0-gh/nickeling/blob/main/docs/development.md#cli-installation-and-resources).
+Source-checkout commands below work before publication as well.
 
 ## Render a manifest
 
@@ -33,7 +45,7 @@ Replacing an existing file requires an explicit option. `check`, `render` and
 `lock` do not run cluster management tools or project commands.
 
 The installed CLI also needs the matching Nickel/Nix resource directory.
-See [installation and resources](../../README.md#installation-and-resources);
+See [installation and resources](https://github.com/f1b0-gh/nickeling/blob/main/README.md#installation-and-resources);
 `cargo install` installs the executable only.
 
 ## Supported resources
@@ -44,7 +56,7 @@ Secrets by name, without embedding their values.
 
 The compiler does not provision nodes or guarantee that a cluster will admit
 or run the resources. For observation and application through a controller,
-see [nickel-plane](../nickel-plane/README.md).
+see [nickel-plane](https://github.com/f1b0-gh/nickeling/blob/main/crates/nickel-plane/README.md).
 
 Use `default-features = false` for the Rust API without Clap.
-The [guide](GUIDE.md) covers versions, limits and resource composition.
+The [guide](https://github.com/f1b0-gh/nickeling/blob/main/crates/nickel-k8s/GUIDE.md) covers versions, limits and resource composition.

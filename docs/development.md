@@ -75,10 +75,28 @@ not deploy to an external cluster or establish Scaleway readiness.
 
 ## Release readiness
 
-The current distribution target is the GitHub source repository. Real Kubernetes
-operation and deployment on Scaleway remain to be validated. Local fixture,
-compiler and container checks do not establish that readiness. Crates.io
-publication is deferred until the intended workflows have been exercised.
+All four crates are preparing for a first crates.io release at 0.1.0. The kind
+suite provides the initial real Kubernetes API validation for that release;
+Scaleway deployment remains a separate validation milestone.
+
+Before publishing, require the native and kind CI jobs to pass on the release
+revision and verify the actual Cargo archives from a clean checkout:
+
+```sh
+cargo package --workspace --all-features --locked
+cargo publish --workspace --dry-run --locked
+```
+
+Use the pinned development shell and the existing Cargo lockfile. Workspace
+packaging builds the extracted archives with registry-style dependencies, so it
+also checks that local sibling paths are not required to compile the release.
+CI runs archive verification after its source checks. A dry run does not upload.
+
+Publish `nickel-util` first, then `nickel-k8s` and `nickel-tf`, and finally
+`nickel-plane`; each dependent crate requires the preceding 0.1.0 packages to
+be available in the registry. Record the source revision and archive hashes.
+Publishing requires a crates.io account with a verified email and a Cargo
+credential configured outside the repository.
 
 ## CLI installation and resources
 
@@ -95,6 +113,24 @@ resources from a recorded source revision:
 | `nickel-plane --k8s-resources` | The `nickel-k8s` resource directory |
 | `nickel-plane --schema NAME=PATH` | A frozen schema bundle for that name |
 
+The crates.io archives include these resources, examples and license notices.
+After publication, a CLI can be installed with, for example,
+`cargo install nickel-k8s --version 0.1.0 --locked`. To obtain its matching
+resources without a repository checkout:
+
+```sh
+curl --fail --location https://crates.io/api/v1/crates/nickel-k8s/0.1.0/download \
+  --output nickel-k8s-0.1.0.crate
+tar -xzf nickel-k8s-0.1.0.crate
+K8S_RESOURCES="$(cd nickel-k8s-0.1.0 && pwd -P)"
+# Pass --resources "$K8S_RESOURCES" to nickel-k8s.
+```
+
+Use the corresponding archive for `nickel-tf` or `nickel-plane`; the controller
+also needs the compiler resources for each enabled adapter. Native tools still
+need explicit preparation. Container builds use the full source checkout and
+its workspace lockfile, rather than an isolated controller archive.
+
 Pass normalized absolute resource paths without symlinks or `..` components.
 These are trusted Nickel/Nix resources; project modules are staged separately
 for confined evaluation. Keep schema bundles, catalogs and generated outputs
@@ -107,8 +143,10 @@ stay outside source control. Preserve Cargo and Nix locks; follow the
 
 ## Rust consumers
 
-The workspace uses versioned local paths between its four crates. For an external
-consumer before a registry release, select a full Git commit or a versioned,
+After publication, select `nickel-util = "=0.1.0"` (or the other crate's name)
+in a consumer's dependencies. The workspace uses versioned local paths between
+its four crates; Cargo replaces those paths with registry dependencies when
+packaging. For an external consumer before a registry release, select a full Git commit or a versioned,
 verifiable source archive. An exact `=0.1.0` requirement alone does not identify
 an unpublished source revision; an implicit sibling checkout is not portable.
 
