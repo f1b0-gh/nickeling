@@ -538,8 +538,27 @@ impl Backend for OpenTofu {
         }
         self.observe(context)
     }
+    fn prepare_removal(
+        &mut self,
+        context: &Context,
+        observed: &Observation,
+        operation: &str,
+    ) -> Result<PreparedChange> {
+        self.prepare(context, observed, operation, true)
+    }
+    fn execute_removal(
+        &mut self,
+        context: &Context,
+        change: &PreparedChange,
+    ) -> Result<Observation> {
+        require(
+            change.payload["destroy"] == true,
+            "Expected a saved destroy plan",
+        )?;
+        self.execute_change(context, change)
+    }
     fn remove(&mut self, context: &Context, observed: &Observation) -> Result<Observation> {
-        let plan = self.prepare(context, observed, "remove", true)?;
-        self.execute_change(context, &plan)
+        let plan = self.prepare_removal(context, observed, "remove")?;
+        self.execute_removal(context, &plan)
     }
 }

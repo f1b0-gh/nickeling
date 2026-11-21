@@ -618,22 +618,56 @@ impl<A: Api> Backend for Kubernetes<A> {
         after.interrupted = Some(change.clone());
         self.observe(&after)
     }
-    fn remove(&mut self, context: &Context, observed: &Observation) -> Result<Observation> {
-        let owned = inventory(&observed.inventory)?;
-        for (path, entry) in owned {
-            if let Some(object) = self.get(&path)? {
-                require(
-                    object["metadata"]["uid"] == entry.uid,
-                    "Kubernetes UID changed before deletion",
-                )?;
-                self.mutate("DELETE",&path,&json!({"apiVersion":"v1","kind":"DeleteOptions","preconditions":{"uid":entry.uid,"resourceVersion":text(&object,"/metadata/resourceVersion")?},"propagationPolicy":"Background"}))?;
-            }
+    fn observe_removal(&mut self, context: &Context) -> Result<Observation> {
+        let mut empty = context.clone();
+        empty.artifact["items"] = json!([]);
+        let mut result = self.observe(&empty)?;
+        // Missing historical objects have no delete action or retained inventory.
+        // Excluding them keeps the saved preconditions stable on the next read.
+        if let Some(preconditions) = result.preconditions.as_object_mut() {
+            preconditions.retain(|_, value| !value.is_null());
         }
-        let mut after = context.clone();
-        after.inventory = observed.inventory.clone();
-        after.artifact["items"] = json!([]);
-        let mut result = self.observe(&after)?;
         result.exists = result.inventory.as_object().is_some_and(|m| !m.is_empty());
         Ok(result)
+    }
+    fn prepare_removal(
+        &mut self,
+        context: &Context,
+        observed: &Observation,
+        operation: &str,
+    ) -> Result<PreparedChange> {
+        let mut empty = context.clone();
+        empty.artifact["items"] = json!([]);
+        self.prepare_change(&empty, observed, operation)
+    }
+    fn execute_removal(
+        &mut self,
+        context: &Context,
+        change: &PreparedChange,
+    ) -> Result<Observation> {
+        let actions: Vec<Action> = serde_json::from_value(change.payload["actions"].clone())?;
+        require(
+            actions.iter().all(|a| a.method == "DELETE"),
+            "Expected a deletion plan",
+        )?;
+        let mut empty = context.clone();
+        empty.artifact["items"] = json!([]);
+        let observed = self.observe_removal(context)?;
+        require(
+            observed.preconditions == change.preconditions,
+            "Kubernetes removal preconditions are stale",
+        )?;
+        // execute_change checks the same inventory snapshot, with absent objects
+        // already excluded just as they were during removal planning.
+        empty.inventory = observed.inventory;
+        empty.interrupted = None;
+        let mut result = self.execute_change(&empty, change)?;
+        result.exists = result.inventory.as_object().is_some_and(|m| !m.is_empty());
+        Ok(result)
+    }
+    fn remove(&mut self, context: &Context, _observed: &Observation) -> Result<Observation> {
+        let observed = self.observe_removal(context)?;
+        let plan = self.prepare_removal(context, &observed, "remove")?;
+        self.execute_removal(context, &plan)
     }
 }

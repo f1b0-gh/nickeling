@@ -20,9 +20,12 @@ struct World {
     values: BTreeMap<String, Value>,
     writes: Vec<String>,
     deletes: Vec<String>,
+    removal_plans: Vec<String>,
+    removal_executions: Vec<String>,
     sensitive: bool,
     missing: bool,
     fail: bool,
+    fail_after_delete: bool,
     ready: bool,
     cancel: Option<Arc<AtomicBool>>,
 }
@@ -96,7 +99,34 @@ impl Backend for Fake {
         let mut w = self.world.lock().unwrap();
         w.deletes.push(c.unit_id.clone());
         w.values.remove(&c.unit_id);
+        if w.fail_after_delete {
+            return Err(Error::Backend("interrupted deletion response".into()));
+        }
         Ok(Observation::default())
+    }
+    fn prepare_removal(
+        &mut self,
+        c: &Context,
+        o: &Observation,
+        id: &str,
+    ) -> Result<PreparedChange> {
+        self.world.lock().unwrap().removal_plans.push(id.into());
+        let mut plan = self.prepare_change(c, o, id)?;
+        plan.summary = ChangeSummary {
+            deletes: usize::from(o.exists),
+            ..Default::default()
+        };
+        plan.payload = json!({"remove": true});
+        Ok(plan)
+    }
+    fn execute_removal(&mut self, c: &Context, plan: &PreparedChange) -> Result<Observation> {
+        assert_eq!(plan.payload["remove"], true);
+        self.world
+            .lock()
+            .unwrap()
+            .removal_executions
+            .push(plan.operation.clone());
+        self.remove(c, &Observation::default())
     }
 }
 struct Validate;
@@ -263,5 +293,227 @@ fn retained_units_are_never_deleted_and_retry_is_bounded() -> Result<()> {
     s.mark_removed("mixed", false)?;
     reconcile(&mut s, &c, &Validate, &mut r, &Options::default())?;
     assert!(w.lock().unwrap().deletes.is_empty());
+    Ok(())
+}
+
+#[test]
+fn planning_removed_units_does_not_execute_deletion() -> Result<()> {
+    let (_tmp, mut s, mut c, w, mut r) = fixture()?;
+    s.submit(&c)?;
+    reconcile(&mut s, &c, &Validate, &mut r, &Options::default())?;
+    c.instance.units.remove("a-app");
+    c.units.remove("a-app");
+    c.revision = c.digest()?;
+    s.submit(&c)?;
+    reconcile(
+        &mut s,
+        &c,
+        &Validate,
+        &mut r,
+        &Options {
+            execute: false,
+            prepare: true,
+            ..Default::default()
+        },
+    )?;
+    assert!(w.lock().unwrap().deletes.is_empty());
+    let state = s.unit("mixed", "a-app")?.unwrap();
+    assert!(state.failure.is_none(), "{:?}", state.failure);
+    assert_eq!(state.prepared.unwrap().summary.deletes, 1);
+    Ok(())
+}
+
+#[test]
+fn approving_a_live_unit_does_not_delete_removed_units() -> Result<()> {
+    let (_tmp, mut s, mut c, w, mut r) = fixture()?;
+    s.submit(&c)?;
+    reconcile(&mut s, &c, &Validate, &mut r, &Options::default())?;
+    c.instance.units.remove("a-app");
+    c.units.remove("a-app");
+    c.instance.units.get_mut("z-infra").unwrap().configuration["message"] = json!("next");
+    c.units.get_mut("z-infra").unwrap().artifact = json!({"message":"next"});
+    c.revision = c.digest()?;
+    s.submit(&c)?;
+    reconcile(
+        &mut s,
+        &c,
+        &Validate,
+        &mut r,
+        &Options {
+            execute: false,
+            prepare: true,
+            ..Default::default()
+        },
+    )?;
+    let operation = s
+        .unit("mixed", "z-infra")?
+        .unwrap()
+        .prepared
+        .unwrap()
+        .operation;
+    reconcile(
+        &mut s,
+        &c,
+        &Validate,
+        &mut r,
+        &Options {
+            approved_operation: Some(operation),
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(w.lock().unwrap().values["z-infra"]["message"], "next");
+    assert!(w.lock().unwrap().deletes.is_empty());
+    Ok(())
+}
+
+#[test]
+fn removal_approval_executes_only_the_saved_leaf_plan_then_requires_another_plan() -> Result<()> {
+    let (_tmp, mut s, c, w, mut r) = fixture()?;
+    s.submit(&c)?;
+    reconcile(&mut s, &c, &Validate, &mut r, &Options::default())?;
+    s.mark_removed("mixed", true)?;
+    let plan_options = Options {
+        execute: false,
+        prepare: true,
+        ..Default::default()
+    };
+    reconcile(&mut s, &c, &Validate, &mut r, &plan_options)?;
+    let operation = s
+        .unit("mixed", "a-app")?
+        .unwrap()
+        .prepared
+        .unwrap()
+        .operation;
+    reconcile(
+        &mut s,
+        &c,
+        &Validate,
+        &mut r,
+        &Options {
+            approved_operation: Some(operation.clone()),
+            ..Default::default()
+        },
+    )?;
+    {
+        let world = w.lock().unwrap();
+        assert_eq!(world.deletes, vec!["a-app"]);
+        assert_eq!(world.removal_plans, vec![operation.clone()]);
+        assert_eq!(world.removal_executions, vec![operation]);
+        assert!(world.values.contains_key("z-infra"));
+    }
+    reconcile(&mut s, &c, &Validate, &mut r, &plan_options)?;
+    let operation = s
+        .unit("mixed", "z-infra")?
+        .unwrap()
+        .prepared
+        .unwrap()
+        .operation;
+    reconcile(
+        &mut s,
+        &c,
+        &Validate,
+        &mut r,
+        &Options {
+            approved_operation: Some(operation),
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(w.lock().unwrap().deletes, vec!["a-app", "z-infra"]);
+    Ok(())
+}
+
+#[test]
+fn stale_removal_approval_never_substitutes_a_fresh_plan() -> Result<()> {
+    let (_tmp, mut s, mut c, w, mut r) = fixture()?;
+    s.submit(&c)?;
+    reconcile(&mut s, &c, &Validate, &mut r, &Options::default())?;
+    c.instance.units.remove("a-app");
+    c.units.remove("a-app");
+    c.revision = c.digest()?;
+    s.submit(&c)?;
+    reconcile(
+        &mut s,
+        &c,
+        &Validate,
+        &mut r,
+        &Options {
+            execute: false,
+            prepare: true,
+            ..Default::default()
+        },
+    )?;
+    let operation = s
+        .unit("mixed", "a-app")?
+        .unwrap()
+        .prepared
+        .unwrap()
+        .operation;
+    w.lock()
+        .unwrap()
+        .values
+        .insert("a-app".into(), json!({"message":"changed remotely"}));
+    reconcile(
+        &mut s,
+        &c,
+        &Validate,
+        &mut r,
+        &Options {
+            approved_operation: Some(operation),
+            ..Default::default()
+        },
+    )?;
+    assert!(s
+        .unit("mixed", "a-app")?
+        .unwrap()
+        .failure
+        .unwrap()
+        .contains("stale"));
+    let world = w.lock().unwrap();
+    assert!(world.deletes.is_empty());
+    assert_eq!(world.removal_plans.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn interrupted_approved_removal_observes_completion_without_replaying() -> Result<()> {
+    let (_tmp, mut s, mut c, w, mut r) = fixture()?;
+    s.submit(&c)?;
+    reconcile(&mut s, &c, &Validate, &mut r, &Options::default())?;
+    c.instance.units.remove("a-app");
+    c.units.remove("a-app");
+    c.revision = c.digest()?;
+    s.submit(&c)?;
+    reconcile(
+        &mut s,
+        &c,
+        &Validate,
+        &mut r,
+        &Options {
+            execute: false,
+            prepare: true,
+            ..Default::default()
+        },
+    )?;
+    let operation = s
+        .unit("mixed", "a-app")?
+        .unwrap()
+        .prepared
+        .unwrap()
+        .operation;
+    let mut options = Options {
+        approved_operation: Some(operation),
+        ..Default::default()
+    };
+    w.lock().unwrap().fail_after_delete = true;
+    reconcile(&mut s, &c, &Validate, &mut r, &options)?;
+    assert!(s.running("mixed", "a-app")?.is_some());
+    w.lock().unwrap().fail_after_delete = false;
+    options.now = 10;
+    reconcile(&mut s, &c, &Validate, &mut r, &options)?;
+    assert!(s.unit("mixed", "a-app")?.unwrap().deleted);
+    assert!(s.unit("mixed", "a-app")?.unwrap().failure.is_none());
+    assert!(s.running("mixed", "a-app")?.is_none());
+    assert_eq!(w.lock().unwrap().deletes, vec!["a-app"]);
+    assert_eq!(w.lock().unwrap().removal_plans.len(), 1);
     Ok(())
 }

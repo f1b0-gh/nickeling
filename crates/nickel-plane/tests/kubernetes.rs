@@ -41,6 +41,9 @@ impl Api for FakeApi {
             if old["metadata"]["uid"] != body["preconditions"]["uid"] {
                 return Ok((409, Value::Null));
             }
+            if old["metadata"]["resourceVersion"] != body["preconditions"]["resourceVersion"] {
+                return Ok((409, Value::Null));
+            }
             if !self.delay_delete {
                 self.objects.remove(route);
             }
@@ -614,5 +617,71 @@ fn optional_empty_lists_follow_kubernetes_serialization() -> Result<()> {
         !k.observe(&c)?.drifted,
         "Omitted empty optional lists are equivalent"
     );
+    Ok(())
+}
+
+#[test]
+fn saved_removal_plans_preserve_preconditions_and_finalizer_inventory() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut c = context(temp.path().into())?;
+    let mut k = Kubernetes {
+        api: FakeApi::default(),
+        target: target(),
+    };
+    let observed = k.observe(&c)?;
+    let create = k.prepare_change(&c, &observed, "create")?;
+    c.inventory = k.execute_change(&c, &create)?.inventory;
+    let before = k.observe_removal(&c)?;
+    let delete = k.prepare_removal(&c, &before, "approved-delete")?;
+    assert_eq!(delete.summary.deletes, 1);
+    assert_eq!(delete.summary.creates, 0);
+    assert_eq!(delete.summary.updates, 0);
+    assert_eq!(k.api.writes, 1);
+    let path = "/api/v1/namespaces/test/configmaps/settings";
+    k.api.objects.get_mut(path).unwrap()["metadata"]["resourceVersion"] = json!("changed");
+    assert!(k.execute_removal(&c, &delete).is_err());
+    assert_eq!(k.api.writes, 1);
+    let before = k.observe_removal(&c)?;
+    let delete = k.prepare_removal(&c, &before, "fresh-delete")?;
+    k.api.delay_delete = true;
+    let pending = k.execute_removal(&c, &delete)?;
+    assert!(
+        pending.exists,
+        "Finalizers must keep upstream resources protected"
+    );
+    assert!(pending.inventory.as_object().unwrap().contains_key(path));
+    c.inventory = pending.inventory;
+    k.api.objects.remove(path);
+    let after = k.observe_removal(&c)?;
+    assert!(!after.exists);
+    assert_eq!(after.inventory, json!({}));
+    Ok(())
+}
+
+#[test]
+fn removal_recovers_a_partial_interrupted_create_and_ignores_absent_paths() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut c = context(temp.path().into())?;
+    let mut other = c.artifact["items"][0].clone();
+    other["metadata"]["name"] = json!("settings-b");
+    c.artifact["items"].as_array_mut().unwrap().push(other);
+    let mut k = Kubernetes {
+        api: FakeApi::default(),
+        target: target(),
+    };
+    let before = k.observe(&c)?;
+    let create = k.prepare_change(&c, &before, "interrupted-create")?;
+    k.api.interrupt = true;
+    assert!(k.execute_change(&c, &create).is_err());
+    assert_eq!(k.api.objects.len(), 1);
+    c.interrupted = Some(create);
+    let before = k.observe_removal(&c)?;
+    let delete = k.prepare_removal(&c, &before, "remove-partial")?;
+    assert_eq!(delete.summary.deletes, 1);
+    c.inventory = before.inventory;
+    let after = k.execute_removal(&c, &delete)?;
+    assert!(!after.exists);
+    assert!(k.api.objects.is_empty());
+    assert_eq!(k.api.writes, 2);
     Ok(())
 }

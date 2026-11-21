@@ -90,6 +90,10 @@ A plan returns operation IDs under `units.<id>.change`. Set `policy.mode` to
 `"manage"` **before** planning if you intend to apply. An input revision, target,
 artifact, native plan or remote precondition change invalidates that plan.
 `apply` refuses stale operations; it does not substitute an unreviewed plan.
+Removed units also receive saved deletion plans. Planning stops at the first
+pending removed unit in reverse dependency order; after applying that operation,
+plan again for the next unit. Independent removed units are serialized too.
+Applying a live unit's plan never authorizes deletion of another unit.
 `reconcile` with `mode="manage"` authorizes automatic convergence in advance.
 
 ## Instance and composition model

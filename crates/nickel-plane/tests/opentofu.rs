@@ -70,8 +70,22 @@ fn native_saved_plans_preserve_state_identity_and_protect_sensitive_outputs() ->
     assert_eq!(after.outputs["result"].value, Some(json!("updated")));
     context.inventory = after.inventory;
     let observed = backend.observe(&context)?;
-    let removed = backend.remove(&context, &observed)?;
+    let destroy = backend.prepare_removal(&context, &observed, "reviewed-destroy")?;
+    assert!(destroy.summary.deletes >= 1);
+    assert_eq!(destroy.payload["destroy"], true);
+    let saved = context.work.join("operation-reviewed-destroy.tfplan");
+    let bytes = std::fs::read(&saved)?;
+    assert!(
+        backend.observe(&context)?.exists,
+        "Planning must not destroy resources"
+    );
+    let removed = backend.execute_removal(&context, &destroy)?;
     assert!(!removed.exists);
+    assert_eq!(
+        std::fs::read(saved)?,
+        bytes,
+        "Execute must reuse the reviewed native plan"
+    );
     Ok(())
 }
 

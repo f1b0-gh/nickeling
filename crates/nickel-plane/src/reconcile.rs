@@ -52,6 +52,8 @@ pub struct UnitState {
     pub retained: bool,
     #[serde(default)]
     pub deleted: bool,
+    #[serde(default)]
+    pub removing: bool,
     pub failure: Option<String>,
     pub waiting: Option<String>,
     pub attempts: u32,
@@ -240,6 +242,7 @@ pub fn reconcile(
             state.rendered = true;
             state.retained = false;
             state.deleted = false;
+            state.removing = false;
             state.definition = Some(unit.clone());
             state.effective = Some(effective);
             let changed = !observed.exists
@@ -401,15 +404,34 @@ fn remove_selected(
         let mut state = states
             .remove(&id)
             .ok_or_else(|| Error::Invalid("Missing removal state".into()))?;
+        if state.deleted {
+            continue;
+        }
+        let selected = options.approved_operation.as_ref().is_none_or(|operation| {
+            state.removing
+                && state
+                    .prepared
+                    .as_ref()
+                    .is_some_and(|p| &p.operation == operation)
+        });
+        // A selected upstream deletion must wait for all removed dependents.
+        // Applying a live-unit plan never authorizes this removal pass.
+        if options.approved_operation.is_some() && !selected {
+            break;
+        }
+        if state.revision != compiled.revision || !state.removing {
+            state.prepared = None;
+            state.attempts = 0;
+            state.next_retry = 0;
+            state.failure = None;
+        }
         state.revision = compiled.revision.clone();
+        state.removing = true;
         state.applied = false;
         state.outputs.clear();
         if !delete {
             state.retained = !state.deleted;
             store.save_unit(&compiled.instance.id, &id, &state)?;
-            continue;
-        }
-        if state.deleted {
             continue;
         }
         if options.cancelled.load(Ordering::SeqCst) {
@@ -422,12 +444,6 @@ fn remove_selected(
         if state.attempts >= 5 || state.next_retry > options.now {
             break;
         }
-        require(
-            options.execute
-                && compiled.instance.policy.allow_delete
-                && compiled.instance.policy.mode == Management::Manage,
-            "Deletion requires explicit execution policy",
-        )?;
         let result = (|| -> Result<()> {
             // A unit that never reached domain validation has no external inventory.
             if state.definition.is_none() && state.inventory.is_null() {
@@ -463,28 +479,68 @@ fn remove_selected(
                 engine_version: artifact.engine_version.clone(),
                 provider_lock: artifact.provider_lock.clone().map(String::into_bytes),
             };
-            let observed = backend.observe(&context)?;
-            // exists describes desired completeness; an incomplete Kubernetes unit can
-            // still own other objects, so deletion must inspect its inventory as well.
-            let change = PreparedChange {
-                operation: store.token()?,
-                revision: compiled.revision.clone(),
-                artifact_sha256: state.artifact_sha256.clone(),
-                target_sha256: state.target_sha256.clone(),
-                summary: ChangeSummary {
-                    deletes: 1,
-                    ..Default::default()
-                },
-                payload: json!({"remove":true}),
-                preconditions: observed.preconditions.clone(),
-            };
+            let observed = backend.observe_removal(&context)?;
             state.inventory = observed.inventory.clone();
             store.save_unit(&compiled.instance.id, &id, &state)?;
             if let Some(previous) = &context.interrupted {
                 store.finish(&previous.operation, "recovered")?;
+                state.prepared = None;
             }
+            if !observed.exists
+                && (options.approved_operation.is_none() || context.interrupted.is_some())
+            {
+                state.deleted = true;
+                state.retained = false;
+                state.prepared = None;
+                state.failure = None;
+                state.attempts = 0;
+                state.next_retry = 0;
+                return Ok(());
+            }
+            if !(options.prepare || options.execute) {
+                return Ok(());
+            }
+            let change = if let Some(previous) = state.prepared.as_ref().filter(|p| {
+                p.revision == compiled.revision
+                    && p.artifact_sha256 == context.artifact_sha256
+                    && p.target_sha256 == state.target_sha256
+                    && p.preconditions == observed.preconditions
+            }) {
+                previous.clone()
+            } else {
+                require(
+                    options.approved_operation.is_none(),
+                    "Approved removal plan is stale; prepare and review a fresh plan",
+                )?;
+                let token = store.token()?;
+                let prepared = backend.prepare_removal(&context, &observed, &token)?;
+                require(
+                    prepared.operation == token
+                        && prepared.revision == context.revision
+                        && prepared.artifact_sha256 == context.artifact_sha256
+                        && prepared.target_sha256 == state.target_sha256,
+                    "Backend returned an incorrectly bound removal plan",
+                )?;
+                store.record(&compiled.instance.id, &id, &prepared, "prepared")?;
+                prepared
+            };
+            state.prepared = Some(change.clone());
+            state.failure = None;
+            store.save_unit(&compiled.instance.id, &id, &state)?;
+            if !options.execute {
+                return Ok(());
+            }
+            require(
+                compiled.instance.policy.allow_delete
+                    && compiled.instance.policy.mode == Management::Manage,
+                "Deletion requires explicit execution policy",
+            )?;
+            if options.cancelled.load(Ordering::SeqCst) {
+                return Err(Error::Cancelled);
+            }
+            store.ensure_revision(&compiled.instance.id, &compiled.revision)?;
             store.record(&compiled.instance.id, &id, &change, "running")?;
-            let after = backend.remove(&context, &observed)?;
+            let after = backend.execute_removal(&context, &change)?;
             state.inventory = after.inventory;
             state.retained = after.exists;
             state.deleted = !after.exists;
@@ -493,11 +549,16 @@ fn remove_selected(
             state.next_retry = 0;
             store.save_unit(&compiled.instance.id, &id, &state)?;
             if state.deleted {
+                state.prepared = None;
+                store.save_unit(&compiled.instance.id, &id, &state)?;
                 store.finish(&change.operation, "succeeded")?;
             }
             Ok(())
         })();
         if let Err(error) = result {
+            if matches!(error, Error::Cancelled) {
+                return Err(error);
+            }
             state.failed(&error, options.now);
         }
         store.save_unit(&compiled.instance.id, &id, &state)?;
