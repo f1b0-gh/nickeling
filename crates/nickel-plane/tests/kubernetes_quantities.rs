@@ -36,6 +36,7 @@ fn observe(desired: Value, mut actual: Value) -> Result<bool> {
         "Deployment" => "/apis/apps/v1/namespaces/test/deployments/app",
         "StatefulSet" => "/apis/apps/v1/namespaces/test/statefulsets/app",
         "ConfigMap" => "/api/v1/namespaces/test/configmaps/app",
+        "PersistentVolumeClaim" => "/api/v1/namespaces/test/persistentvolumeclaims/app",
         _ => return Err(Error::Invalid("Unexpected fixture kind".into())),
     };
     actual["metadata"]["uid"] = json!("owned-uid");
@@ -143,6 +144,118 @@ fn missing_requested_resource_keys_still_drift() -> Result<()> {
         .as_object_mut()
         .unwrap()
         .remove("cpu");
+    assert!(observe(desired, actual)?);
+    Ok(())
+}
+
+fn storage_workload(kind: &str) -> Value {
+    let resources =
+        json!({"requests":{"ephemeral-storage":"1024Mi"},"limits":{"ephemeral-storage":"1024Mi"}});
+    let claim = json!({"spec":{"accessModes":["ReadWriteOnce"],"storageClassName":"",
+        "resources":{"requests":{"storage":1073741824_u64},"limits":{"storage":"1024Mi"}}}});
+    let mut object = workload(kind);
+    object["spec"]["template"]["spec"]["containers"][0]["resources"] = resources.clone();
+    object["spec"]["template"]["spec"]["initContainers"] =
+        json!([{"name":"init","image":"example:1","resources":resources}]);
+    object["spec"]["template"]["spec"]["volumes"] = json!([
+        {"name":"scratch","emptyDir":{"sizeLimit":"1024Mi"}},
+        {"name":"ephemeral","ephemeral":{"volumeClaimTemplate":claim}}
+    ]);
+    if kind == "StatefulSet" {
+        object["spec"]["volumeClaimTemplates"] = json!([claim]);
+    }
+    object
+}
+
+fn storage_paths(kind: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for bound in ["requests", "limits"] {
+        if kind == "PersistentVolumeClaim" {
+            paths.push(format!("/spec/resources/{bound}/storage"));
+            continue;
+        }
+        for container in ["containers", "initContainers"] {
+            paths.push(format!(
+                "/spec/template/spec/{container}/0/resources/{bound}/ephemeral-storage"
+            ));
+        }
+        paths.push(format!("/spec/template/spec/volumes/1/ephemeral/volumeClaimTemplate/spec/resources/{bound}/storage"));
+        if kind == "StatefulSet" {
+            paths.push(format!(
+                "/spec/volumeClaimTemplates/0/spec/resources/{bound}/storage"
+            ));
+        }
+    }
+    if kind != "PersistentVolumeClaim" {
+        paths.push("/spec/template/spec/volumes/0/emptyDir/sizeLimit".into());
+    }
+    paths
+}
+
+#[test]
+fn canonical_storage_observes_without_drift_and_real_changes_still_drift_without_writes(
+) -> Result<()> {
+    for kind in ["PersistentVolumeClaim", "Deployment", "StatefulSet"] {
+        let desired = if kind == "PersistentVolumeClaim" {
+            json!({"apiVersion":"v1","kind":kind,"metadata":{"name":"app","namespace":"test"},
+                "spec":{"accessModes":["ReadWriteOnce"],"storageClassName":"",
+                "resources":{"requests":{"storage":1073741824_u64},"limits":{"storage":"1024Mi"}}}})
+        } else {
+            storage_workload(kind)
+        };
+        let mut canonical = desired.clone();
+        for pointer in storage_paths(kind) {
+            *canonical.pointer_mut(&pointer).unwrap() = json!("1Gi");
+        }
+        assert!(
+            !observe(desired.clone(), canonical.clone())?,
+            "{kind}: false canonicalization drift"
+        );
+        for pointer in storage_paths(kind) {
+            for changed in ["1G", "2Gi", "1073741825"] {
+                let mut actual = canonical.clone();
+                *actual.pointer_mut(&pointer).unwrap() = json!(changed);
+                assert!(
+                    observe(desired.clone(), actual)?,
+                    "{kind} {pointer}: missing drift for {changed}"
+                );
+            }
+            let mut actual = canonical.clone();
+            let (parent, key) = pointer.rsplit_once('/').unwrap();
+            actual
+                .pointer_mut(parent)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            assert!(
+                observe(desired.clone(), actual)?,
+                "{kind} {pointer}: missing field must drift"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn storage_shaped_unrelated_strings_still_drift_without_writes() -> Result<()> {
+    let mut desired = storage_workload("Deployment");
+    desired["metadata"]["annotations"]["storage"] = json!("1024Mi");
+    desired["spec"]["template"]["spec"]["containers"][0]["env"][0]["value"] = json!("1024Mi");
+    for pointer in [
+        "/metadata/annotations/storage",
+        "/spec/template/spec/containers/0/env/0/value",
+    ] {
+        let mut actual = desired.clone();
+        *actual.pointer_mut(pointer).unwrap() = json!("1Gi");
+        assert!(
+            observe(desired.clone(), actual)?,
+            "lost literal drift: {pointer}"
+        );
+    }
+    let desired = json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"app","namespace":"test"},"data":{"storage":"1024Mi"}});
+    let mut actual = desired.clone();
+    actual["data"]["storage"] = json!("1Gi");
     assert!(observe(desired, actual)?);
     Ok(())
 }

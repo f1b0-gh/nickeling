@@ -38,6 +38,16 @@ they require this explicitly provisioned cluster. Use `--filter TEST_NAME` for a
 focused run. These tests qualify local API behavior, not k3s, production
 availability, external networking, or workload deployment readiness.
 
+Storage fixtures cover PVC requests/limits, regular and init-container ephemeral
+storage, emptyDir limits, StatefulSet claim templates, and generic ephemeral
+volume claim templates. Each fixture checks the server's canonical quantity
+spelling and absence of false drift; a changed quantity must still report drift.
+A Deployment template update also exercises the separate ownership transfer and
+fresh server-side apply. Workloads have zero replicas, and claims explicitly use
+no StorageClass. The unbound PVC remains NotReady. These tests do not resize PVCs,
+update immutable StatefulSet claim templates, provision storage, or start Pods.
+Their service account gains only namespaced PVC and StatefulSet access.
+
 The driver always attempts to remove its own cluster after success, failure or
 interruption. It verifies the cluster label before deletion. Existing clusters
 and images are preserved. An image first fetched by this run is removed only

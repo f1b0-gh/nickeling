@@ -117,22 +117,37 @@ needs neither a cloud account nor an external provider.
 
 ## Installation and resources
 
-Use a source checkout for the commands above. To install a CLI from that
-checkout, for example:
+Each component can be selected separately. From a source checkout, choose the
+installation you need; Cargo builds its required Rust libraries automatically.
 
-```sh
-cargo install --path crates/nickel-k8s --locked
-```
+| Component | Install command |
+| --- | --- |
+| Kubernetes compiler | `cargo install --path crates/nickel-k8s --locked` |
+| OpenTofu compiler | `cargo install --path crates/nickel-tf --locked` |
+| Controller with both adapters | `cargo install --path crates/nickel-plane --locked` |
+| Kubernetes-only controller | `cargo install --path crates/nickel-plane --locked --no-default-features --features cli,kubernetes` |
+| OpenTofu-only controller | `cargo install --path crates/nickel-plane --locked --no-default-features --features cli,opentofu` |
 
-This installs the executable. Keep the matching checkout for its `nickel/`,
+`nickel-util` is a library, so use it as a Rust dependency rather than with
+`cargo install`. It has no dependency on the other Nickeling crates. Each
+compiler depends on `nickel-util`; the controller includes only the compilers
+for its enabled adapters. See the [standalone library example](crates/nickel-util/README.md#usage).
+
+These commands install the selected executable. Keep the matching checkout for its `nickel/`,
 `flake.nix` and `flake.lock` resources, and pass the crate directory as
 `--resources`. The OpenTofu compiler also needs an explicitly prepared schema
 bundle. Resource directories contain trusted code; project configuration is
 evaluated separately in confinement.
 
-Rust consumers can use the libraries with `default-features = false` to omit
-Clap; `nickel-util` has no CLI. See the [development guide](docs/development.md)
-for resource layout, source pinning and native tool preparation.
+All four components can also be used as Rust libraries. Pin the Git source to a
+reviewed full commit and set `default-features = false` for `nickel-k8s`,
+`nickel-tf` and `nickel-plane` to omit their CLI dependencies. For `nickel-plane`,
+select `features = ["kubernetes"]`, `features = ["opentofu"]`, or both; neither
+adapter is included with default features disabled unless explicitly selected.
+`nickel-util` has no feature flags or CLI dependencies.
+
+See the [development guide](docs/development.md) for resource layout, source
+pinning and native tool preparation.
 
 ## From configuration to execution
 

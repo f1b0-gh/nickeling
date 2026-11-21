@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use std::{
     io::{ErrorKind, Read, Seek, Write},
     os::{fd::AsRawFd, unix::process::CommandExt},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -53,8 +53,63 @@ fn drain(
         }
     }
 }
-pub fn capture(command: Command, timeout: Duration, limit: usize) -> Result<Vec<u8>> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stream {
+    Stdout,
+    Stderr,
+}
+#[derive(Debug)]
+pub enum Completion {
+    Exited(ExitStatus),
+    TimedOut,
+    OutputLimit { stream: Stream },
+}
+pub struct Captured {
+    pub completion: Completion,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+impl std::fmt::Debug for Captured {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Captured")
+            .field("completion", &self.completion)
+            .field("stdout_bytes", &self.stdout.len())
+            .field("stderr_bytes", &self.stderr.len())
+            .finish()
+    }
+}
+/// Both streams remain private data, including on failure. Debug shows only lengths.
+pub fn capture_outcome(command: Command, timeout: Duration, limit: usize) -> Result<Captured> {
     capture_inner(command, timeout, limit, Stdio::null())
+}
+pub fn capture(command: Command, timeout: Duration, limit: usize) -> Result<Vec<u8>> {
+    legacy_capture(command, timeout, limit, Stdio::null())
+}
+fn legacy_capture(
+    command: Command,
+    timeout: Duration,
+    limit: usize,
+    input: Stdio,
+) -> Result<Vec<u8>> {
+    let program = command.get_program().to_os_string();
+    let output = capture_inner(command, timeout, limit, input)?;
+    match output.completion {
+        Completion::Exited(status) if status.success() => Ok(output.stdout),
+        Completion::Exited(status) => Err(Error::ProcessExit {
+            program,
+            status,
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }),
+        Completion::TimedOut => Err(Error::ProcessTimeout { program, timeout }),
+        Completion::OutputLimit { stream } => Err(Error::ProcessOutputLimit {
+            program,
+            stream: match stream {
+                Stream::Stdout => "stdout",
+                Stream::Stderr => "stderr",
+            },
+            limit,
+        }),
+    }
 }
 /// A private seekable input avoids deadlock when a bounded child never reads stdin.
 pub fn capture_input(
@@ -71,14 +126,14 @@ pub fn capture_input(
     let mut file = tempfile::tempfile()?;
     file.write_all(input)?;
     file.rewind()?;
-    capture_inner(command, timeout, limit, Stdio::from(file))
+    legacy_capture(command, timeout, limit, Stdio::from(file))
 }
 fn capture_inner(
     mut command: Command,
     timeout: Duration,
     limit: usize,
     input: Stdio,
-) -> Result<Vec<u8>> {
+) -> Result<Captured> {
     command
         .stdin(input)
         .stdout(Stdio::piped())
@@ -102,27 +157,52 @@ fn capture_inner(
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let start = Instant::now();
-    loop {
-        drain(&mut out, &mut stdout, limit, &program, "stdout")?;
-        drain(&mut err, &mut stderr, limit, &program, "stderr")?;
-        if let Some(status) = child.0.try_wait()? {
-            drain(&mut out, &mut stdout, limit, &program, "stdout")?;
-            drain(&mut err, &mut stderr, limit, &program, "stderr")?;
-            if !status.success() {
-                return Err(Error::ProcessExit {
-                    program: program.clone(),
-                    status,
-                    stderr: String::from_utf8_lossy(&stderr).into_owned(),
-                });
+    let completion = loop {
+        let streams = drain(&mut out, &mut stdout, limit, &program, "stdout")
+            .and_then(|()| drain(&mut err, &mut stderr, limit, &program, "stderr"));
+        if let Err(error) = streams {
+            match error {
+                Error::ProcessOutputLimit { stream, .. } => {
+                    break Completion::OutputLimit {
+                        stream: if stream == "stdout" {
+                            Stream::Stdout
+                        } else {
+                            Stream::Stderr
+                        },
+                    }
+                }
+                other => return Err(other),
             }
-            return Ok(stdout);
+        }
+        if let Some(status) = child.0.try_wait()? {
+            // Drain once more after exit; descendants cannot keep us waiting.
+            let streams = drain(&mut out, &mut stdout, limit, &program, "stdout")
+                .and_then(|()| drain(&mut err, &mut stderr, limit, &program, "stderr"));
+            if let Err(error) = streams {
+                match error {
+                    Error::ProcessOutputLimit { stream, .. } => {
+                        break Completion::OutputLimit {
+                            stream: if stream == "stdout" {
+                                Stream::Stdout
+                            } else {
+                                Stream::Stderr
+                            },
+                        }
+                    }
+                    other => return Err(other),
+                }
+            }
+            break Completion::Exited(status);
         }
         if start.elapsed() >= timeout {
-            return Err(Error::ProcessTimeout {
-                program: program.clone(),
-                timeout,
-            });
+            break Completion::TimedOut;
         }
         thread::sleep(Duration::from_millis(10));
-    }
+    };
+    drop(child);
+    Ok(Captured {
+        completion,
+        stdout,
+        stderr,
+    })
 }

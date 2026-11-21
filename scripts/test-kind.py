@@ -276,7 +276,7 @@ def main():
             {"apiVersion":"v1","kind":"Namespace","metadata":{"name":"nickeling-api"}},
             {"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"fixture","namespace":"nickeling-api"}},
             {"apiVersion":"rbac.authorization.k8s.io/v1","kind":"Role","metadata":{"name":"fixture","namespace":"nickeling-api"},
-             "rules":[{"apiGroups":["","apps","networking.k8s.io"],"resources":["configmaps","services","deployments","networkpolicies"],"verbs":["get","list","watch","create","patch","delete"]}]},
+             "rules":[{"apiGroups":["","apps","networking.k8s.io"],"resources":["configmaps","services","deployments","networkpolicies","persistentvolumeclaims","statefulsets"],"verbs":["get","list","watch","create","patch","delete"]}]},
             {"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{"name":"fixture","namespace":"nickeling-api"},
              "subjects":[{"kind":"ServiceAccount","name":"fixture","namespace":"nickeling-api"}],
              "roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"Role","name":"fixture"}}]}
