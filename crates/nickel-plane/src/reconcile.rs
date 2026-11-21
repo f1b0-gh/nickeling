@@ -570,7 +570,18 @@ fn remove_selected(
     Ok(())
 }
 
-pub fn poll_events(store: &Store, compiled: &Compiled, backends: &mut Registry) -> Result<bool> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PollEvents {
+    Changed,
+    Quiet,
+    Unavailable,
+}
+
+pub fn poll_events(
+    store: &Store,
+    compiled: &Compiled,
+    backends: &mut Registry,
+) -> Result<PollEvents> {
     let started = std::time::Instant::now();
     for state in store.units(&compiled.instance.id)?.values() {
         if started.elapsed() >= std::time::Duration::from_secs(3) {
@@ -579,11 +590,12 @@ pub fn poll_events(store: &Store, compiled: &Compiled, backends: &mut Registry) 
         if let Some(unit) = &state.definition {
             if let Some(backend) = backends.get_mut(&unit.target) {
                 match backend.poll_events(&state.inventory) {
-                    Ok(true) | Err(_) => return Ok(true),
+                    Ok(true) => return Ok(PollEvents::Changed),
+                    Err(_) => return Ok(PollEvents::Unavailable),
                     Ok(false) => {}
                 }
             }
         }
     }
-    Ok(false)
+    Ok(PollEvents::Quiet)
 }

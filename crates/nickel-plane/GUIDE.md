@@ -170,6 +170,10 @@ Status separates Rendered, Applied, Ready, Drifted and Failed. Automatic retries
 use exponential delays and stop after five failures for a revision. Explicit
 `--retry-failed` resets this budget once; new revisions reset it too. SIGINT and
 SIGTERM stop at safe boundaries after the current bounded operation finishes.
+Watch events are coalesced with at least one second between service cycles.
+A failed watch waits for the configured periodic resynchronization; it does not
+trigger immediate recompilation. Quiet watches are polled at most four times a
+second, subject to the existing request timeouts.
 Never force-unlock unknown OpenTofu writers. Investigate stale native locks and
 ownership conflicts before retrying.
 
@@ -200,8 +204,8 @@ probe of the application. Deletion is asynchronous when Kubernetes finalizers
 remain. Array observation is conservative about ordering and length.
 
 A bounded watch on one known object per unit supplies scheduling hints. Expired
-watches or transport failures trigger observation; periodic full resynchronization
-covers all remaining objects and missed events. The fixture does not certify
+watches trigger coalesced observation; transport failures wait for periodic full
+resynchronization, which covers remaining objects and missed events. The fixture does not certify
 real API admission, managedFields/defaulting behavior or a particular CNI.
 
 OpenTofu targets require an absolute pinned binary, stable stack name and optional
