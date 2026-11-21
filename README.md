@@ -61,6 +61,16 @@ utilities can be used without running Nickel. Your tool owns its configuration
 model and execution policy; the library supplies the shared input-handling and
 evaluation machinery. See the [library guide](crates/nickel-util/README.md).
 
+Add the published library to your `Cargo.toml`:
+
+```toml
+[dependencies]
+nickel-util = "=0.1.0"
+```
+
+See [nickel-util on crates.io](https://crates.io/crates/nickel-util/0.1.0) and
+its [API reference](https://docs.rs/nickel-util/0.1.0/nickel_util/).
+
 ## Container builds
 
 The included [container recipes](crates/nickel-plane/containers/README.md) combine
@@ -93,13 +103,58 @@ The complete example is
 [`composed-configmap.ncl`](crates/nickel-k8s/examples/composed-configmap.ncl).
 The `/libraries/` imports refer to libraries mounted by the confined evaluator.
 
-## Try it
+## Installation and resources
+
+All four crates are available at version **0.1.0** on crates.io. Choose the
+component you need; Cargo builds its required Rust libraries automatically.
 
 The current crates target Linux; pinned engines and examples target x86_64 Linux.
 Building requires stable Rust and a C compiler. Evaluating Nickel also requires
 Nix, Bubblewrap, `prlimit` and unprivileged user namespaces.
 
-From the repository root:
+| Component | Install from crates.io |
+| --- | --- |
+| [Kubernetes compiler](https://crates.io/crates/nickel-k8s/0.1.0) | `cargo install nickel-k8s --version '=0.1.0' --locked` |
+| [OpenTofu compiler](https://crates.io/crates/nickel-tf/0.1.0) | `cargo install nickel-tf --version '=0.1.0' --locked` |
+| [Controller with both adapters](https://crates.io/crates/nickel-plane/0.1.0) | `cargo install nickel-plane --version '=0.1.0' --locked` |
+| Kubernetes-only controller | `cargo install nickel-plane --version '=0.1.0' --locked --no-default-features --features cli,kubernetes` |
+| OpenTofu-only controller | `cargo install nickel-plane --version '=0.1.0' --locked --no-default-features --features cli,opentofu` |
+
+To install from a source checkout instead, use
+`cargo install --path crates/nickel-k8s --locked` (or the other crate's path),
+keeping the same feature selections.
+
+`nickel-util` is a library, so use it as a Rust dependency rather than with
+`cargo install`. It has no dependency on the other Nickeling crates. Each
+compiler depends on `nickel-util`; the controller includes only the compilers
+for its enabled adapters. See the [standalone library example](crates/nickel-util/README.md#usage).
+
+These commands install the selected executable. Keep the matching checkout or
+extract the versioned crate archive for its `nickel/`, `flake.nix` and
+`flake.lock` resources, and pass the crate directory as `--resources`.
+The [resource installation guide](docs/development.md#cli-installation-and-resources)
+shows how to obtain these files without a source checkout. The OpenTofu compiler
+also needs an explicitly prepared schema bundle. Resource directories contain trusted code; project configuration is
+evaluated separately in confinement.
+
+All four components can also be used as Rust libraries. Select version `=0.1.0`
+from crates.io, or pin the Git source to a reviewed full commit. Set
+`default-features = false` for `nickel-k8s`, `nickel-tf` and `nickel-plane` to omit
+their CLI dependencies. For `nickel-plane`,
+select `features = ["kubernetes"]`, `features = ["opentofu"]`, or both; neither
+adapter is included with default features disabled unless explicitly selected.
+`nickel-util` has no feature flags or CLI dependencies.
+
+API references: [nickel-k8s](https://docs.rs/nickel-k8s/0.1.0/nickel_k8s/),
+[nickel-tf](https://docs.rs/nickel-tf/0.1.0/nickel_tf/), and
+[nickel-plane](https://docs.rs/nickel-plane/0.1.0/nickel_plane/).
+
+See the [development guide](docs/development.md) for resource layout, source
+pinning and native tool preparation.
+
+## Try it
+
+From the root of a source checkout:
 
 ```sh
 NICKELING_ROOT=$(pwd -P)
@@ -114,48 +169,6 @@ cargo run -p nickel-k8s --locked -- render \
 The result is a JSON manifest. No cluster is contacted.
 The [OpenTofu example](crates/nickel-tf/README.md) uses `terraform_data` and
 needs neither a cloud account nor an external provider.
-
-## Installation and resources
-
-Each component can be selected separately. From a source checkout, choose the
-installation you need; Cargo builds its required Rust libraries automatically.
-
-| Component | Install command |
-| --- | --- |
-| Kubernetes compiler | `cargo install --path crates/nickel-k8s --locked` |
-| OpenTofu compiler | `cargo install --path crates/nickel-tf --locked` |
-| Controller with both adapters | `cargo install --path crates/nickel-plane --locked` |
-| Kubernetes-only controller | `cargo install --path crates/nickel-plane --locked --no-default-features --features cli,kubernetes` |
-| OpenTofu-only controller | `cargo install --path crates/nickel-plane --locked --no-default-features --features cli,opentofu` |
-
-Version 0.1.0 is available on crates.io. The equivalent registry command is
-`cargo install nickel-k8s --version 0.1.0 --locked` (or `nickel-tf` / `nickel-plane`).
-The same feature selections apply. Rust consumers can use
-`nickel-util = "=0.1.0"`; see the [resource installation guide](docs/development.md#cli-installation-and-resources)
-for resources from the versioned crate archives.
-
-`nickel-util` is a library, so use it as a Rust dependency rather than with
-`cargo install`. It has no dependency on the other Nickeling crates. Each
-compiler depends on `nickel-util`; the controller includes only the compilers
-for its enabled adapters. See the [standalone library example](crates/nickel-util/README.md#usage).
-
-These commands install the selected executable. Keep the matching checkout or
-extract the versioned crate archive for its `nickel/`,
-`flake.nix` and `flake.lock` resources, and pass the crate directory as
-`--resources`. The OpenTofu compiler also needs an explicitly prepared schema
-bundle. Resource directories contain trusted code; project configuration is
-evaluated separately in confinement.
-
-All four components can also be used as Rust libraries. Select version `=0.1.0`
-from crates.io, or pin the Git source to a reviewed full commit. Set
-`default-features = false` for `nickel-k8s`,
-`nickel-tf` and `nickel-plane` to omit their CLI dependencies. For `nickel-plane`,
-select `features = ["kubernetes"]`, `features = ["opentofu"]`, or both; neither
-adapter is included with default features disabled unless explicitly selected.
-`nickel-util` has no feature flags or CLI dependencies.
-
-See the [development guide](docs/development.md) for resource layout, source
-pinning and native tool preparation.
 
 ## From configuration to execution
 
