@@ -234,24 +234,60 @@ An already-changed legacy target in that situation cannot use this proof mechani
 restore its original trust configuration for a verified upgrade, or wait for an
 explicit migration facility. The controller does not guess the old trust mode.
 
-New objects use POST; existing owned objects use server-side apply without
-force, bound to UID and resourceVersion. This avoids accidental adoption on
-create. Ownership labels alone do not authorize adopting an existing object.
-POST records an Update field owner, which is distinct from an Apply owner. Before
-the first subsequent configuration apply, the controller prepares a separate
-ownership transfer plan. Its public summary reports `fieldOwnershipTransfers`
-and zero configuration updates. The plan changes only its own managed-fields
-entry from Update to Apply, with UID, resourceVersion and exact-entry tests;
-foreign field owners and workload configuration remain unchanged. Ambiguous
-histories with multiple own entries require explicit migration and are refused.
-Transfer entries are limited to 256 KiB and transfer plans to 4 MiB.
+New Kubernetes creation plans disclose `creates` and `fieldOwnershipTransfers`.
+One approval authorizes a create-only sequence: POST the full reviewed object,
+record its returned UID, then initialize that object's own field-manager entry
+from Update to Apply. The metadata-only initializer uses UID, resourceVersion and
+exact managed-fields tests. Its concrete patch is dry-run validated and saved
+before execution. Foreign owners and workload fields remain unchanged. POST
+refuses an existing object; SSA never uses force. Normal creation completes
+without an additional configuration apply or approval.
 
-Review and apply this handoff, then prepare and review a fresh configuration plan.
-The configuration remains pending and the unit is not applied or ready until
-ordinary server-side apply completes. Pending state survives restarts and partial
-handoffs. Manage mode performs the second phase on a subsequent reconciliation;
-manual approval requires that additional plan and apply. The controller never
-forces field conflicts or adopts an existing object to bypass this handoff.
+A plan containing new objects defers existing-object updates and pruning. Its
+public summary sets `deferredChanges`; after creation completes, review a fresh
+plan for that work. Omission-only configuration changes remain pending across
+interruptions and restarts. Applied and Ready stay false until deferred work is
+completed.
+
+Creation checkpoints are separate from the immutable approved plan. POST-issued
+intent is saved before the request and never replayed. If a successful response
+has durably recorded the UID, restart can continue only under the original
+revision, execution snapshot and policy, using a saved concrete initializer if one has already been prepared. Otherwise,
+it prepares that bounded initializer under the same authority. A changed concrete
+continuation requires fresh review; it is never silently rebased. Read recovery
+saves evidence before dependency or changed-authority checks permit another
+mutation. Evidence from a successful response is committed even if cancellation
+then blocks the next mutation; a cycle cancelled before recovery starts exits
+without making recovery requests.
+
+If the POST response was lost before recording its UID, matching labels and
+operation annotations do not prove ownership: another writer can copy them.
+Run `plan` and inspect `change.recoveryBindings` in its status output, including
+the exact namespace, kind, name and candidate UID. Apply that exact plan with
+`apply --plan OPERATION`. This binding-only approval makes no API mutations.
+Then run `plan` again to review initialization of the now-known UID, or review
+its deletion under the removal policy. `serve` and `--retry-failed` do not bypass
+this second approval. A candidate changed after review invalidates the binding.
+
+An absent uncertain POST remains unresolved. An explicit fresh plan can replace
+its authority, while the old issued intent remains tracked for late responses.
+Each unit permits one active source and sixteen superseded unresolved sources,
+with at most 256 outstanding unknown identities. At this limit, further growing
+replacement work refuses; approved deletion of known UIDs remains available.
+Deletion attempts are recorded before execution and recovered by reads only
+following interruption. A new approval is required for remaining UIDs. Unknown
+creation intents remain accounted for through unit/instance removal and retention;
+an empty inventory alone does not establish Deleted. A late candidate still
+requires exact identity review.
+
+Operation approvals are bounded to 16 MiB, progress to 4 MiB, and each ownership
+entry to 256 KiB. Progress keeps at most one concrete initializer patch. The
+store adds a recovery lookup index without rewriting existing ownership data.
+Historical saved POST-only plans retain their historical interrupted recovery
+semantics; the strict unknown-UID binding protocol applies to new compound plans.
+Existing historical Update owners still require the separately reviewed ownership
+transfer and fresh configuration plan. Ambiguous multiple own Update/Apply
+histories remain refused; this change does not migrate those histories.
 
 Pruning uses recorded inventory plus UID/resourceVersion delete preconditions.
 Known workload kinds use observed generation and replica status; other supported

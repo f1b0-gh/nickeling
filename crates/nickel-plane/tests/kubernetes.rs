@@ -1,5 +1,7 @@
 #![allow(clippy::unwrap_used)]
 #![cfg(feature = "kubernetes")]
+#[path = "fixtures/kubernetes_legacy.rs"]
+mod legacy;
 use nickel_plane::{
     adapters::kubernetes::{Api, Kubernetes},
     backend::*,
@@ -32,6 +34,18 @@ impl Api for FakeApi {
             return Ok((409, json!({"message":"private diagnostic"})));
         }
         if path.contains("dryRun=All") {
+            if method == "POST" {
+                let mut result = body;
+                let manager = path
+                    .split("fieldManager=")
+                    .nth(1)
+                    .unwrap_or("fixture")
+                    .split('&')
+                    .next()
+                    .unwrap();
+                result["metadata"]["managedFields"] = json!([{"manager":manager,"operation":"Update","apiVersion":result["apiVersion"],"fieldsType":"FieldsV1","fieldsV1":{}}]);
+                return Ok((201, result));
+            }
             return Ok((200, body));
         }
         if method == "DELETE" {
@@ -108,7 +122,7 @@ fn credential_rotation_invalidates_prepared_changes_before_mutation() -> Result<
     };
     let c = context(temp.path().into())?;
     let observed = k.observe(&c)?;
-    let plan = k.prepare_change(&c, &observed, "before-rotation")?;
+    let plan = legacy::prepare(&mut k, &c, &observed, "before-rotation")?;
     std::fs::write(&token, "second-test-token")?;
     assert!(k.execute_change(&c, &plan).is_err());
     assert_eq!(k.api.writes, 0);
@@ -161,16 +175,16 @@ fn token_rotation_invalidates_update_and_removal_plans() -> Result<()> {
     };
     let mut c = context(temp.path().into())?;
     let observed = k.observe(&c)?;
-    let create = k.prepare_change(&c, &observed, "create")?;
+    let create = legacy::prepare(&mut k, &c, &observed, "create")?;
     c.inventory = k.execute_change(&c, &create)?.inventory;
     c.artifact["items"][0]["data"]["value"] = json!("updated");
     c.artifact_sha256 = "updated".into();
     let observed = k.observe(&c)?;
-    let update = k.prepare_change(&c, &observed, "update")?;
+    let update = legacy::prepare(&mut k, &c, &observed, "update")?;
     std::fs::write(&token, "second-test-token")?;
     assert!(k.execute_change(&c, &update).is_err());
     assert_eq!(k.api.writes, 1);
-    let update = k.prepare_change(&c, &observed, "fresh-update")?;
+    let update = legacy::prepare(&mut k, &c, &observed, "fresh-update")?;
     c.inventory = k.execute_change(&c, &update)?.inventory;
     let observed = k.observe_removal(&c)?;
     let remove = k.prepare_removal(&c, &observed, "remove")?;
@@ -195,6 +209,7 @@ fn context(work: std::path::PathBuf) -> Result<Context> {
         artifact_sha256: "digest".into(),
         inventory: Value::Null,
         interrupted: None,
+        recovery: None,
         work,
         engine_version: None,
         provider_lock: None,
@@ -209,7 +224,7 @@ fn creates_owned_objects_and_refuses_replacement_and_stale_changes() -> Result<(
         target: target(),
     };
     let before = k.observe(&c)?;
-    let plan = k.prepare_change(&c, &before, "operation")?;
+    let plan = legacy::prepare(&mut k, &c, &before, "operation")?;
     assert_eq!(k.api.writes, 0);
     let observed = k.execute_change(&c, &plan)?;
     assert!(observed.exists && !observed.drifted);
@@ -219,7 +234,7 @@ fn creates_owned_objects_and_refuses_replacement_and_stale_changes() -> Result<(
     c.artifact["items"][0]["data"]["value"] = json!("two");
     c.artifact_sha256 = "next".into();
     let before = k.observe(&c)?;
-    let plan = k.prepare_change(&c, &before, "second")?;
+    let plan = legacy::prepare(&mut k, &c, &before, "second")?;
     k.api
         .objects
         .get_mut(path)
@@ -247,7 +262,7 @@ fn recovers_interrupted_create_only_with_matching_operation_intent() -> Result<(
         target: target(),
     };
     let before = k.observe(&c)?;
-    let plan = k.prepare_change(&c, &before, "intended")?;
+    let plan = legacy::prepare(&mut k, &c, &before, "intended")?;
     assert!(k.execute_change(&c, &plan).is_err());
     assert!(k.observe(&c).is_err());
     c.interrupted = Some(plan);
@@ -311,11 +326,11 @@ fn watch_expiry_reconnects_and_pruning_waits_for_owned_deletion() -> Result<()> 
         target: target(),
     };
     let o = k.observe(&c)?;
-    let p = k.prepare_change(&c, &o, "create")?;
+    let p = legacy::prepare(&mut k, &c, &o, "create")?;
     c.inventory = k.execute_change(&c, &p)?.inventory;
     c.artifact["items"] = json!([]);
     let o = k.observe(&c)?;
-    let p = k.prepare_change(&c, &o, "prune")?;
+    let p = legacy::prepare(&mut k, &c, &o, "prune")?;
     assert_eq!(p.summary.deletes, 1);
     let o = k.execute_change(&c, &p)?;
     assert_eq!(o.inventory, json!({}));
@@ -366,7 +381,7 @@ fn array_drift_and_workload_readiness_require_observed_state() -> Result<()> {
         target: target(),
     };
     let o = k.observe(&c)?;
-    let p = k.prepare_change(&c, &o, "np")?;
+    let p = legacy::prepare(&mut k, &c, &o, "np")?;
     c.inventory = k.execute_change(&c, &p)?.inventory;
     k.api
         .objects
@@ -376,7 +391,7 @@ fn array_drift_and_workload_readiness_require_observed_state() -> Result<()> {
     c.inventory = Value::Null;
     c.artifact["items"][0] = json!({"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"app","namespace":"test"},"spec":{"replicas":1}});
     let o = k.observe(&c)?;
-    let p = k.prepare_change(&c, &o, "deployment")?;
+    let p = legacy::prepare(&mut k, &c, &o, "deployment")?;
     let o = k.execute_change(&c, &p)?;
     c.inventory = o.inventory;
     assert_eq!(o.readiness, Readiness::NotReady);
@@ -406,7 +421,7 @@ fn observe_deployment(replicas: u64, status: Value) -> Result<Observation> {
         target: target(),
     };
     let observed = k.observe(&c)?;
-    let change = k.prepare_change(&c, &observed, "deployment")?;
+    let change = legacy::prepare(&mut k, &c, &observed, "deployment")?;
     c.inventory = k.execute_change(&c, &change)?.inventory;
     let object = k
         .api
@@ -495,7 +510,7 @@ fn failed_deployment_allows_correction_and_interrupted_ownership_recovery() -> R
         target: target(),
     };
     let observed = k.observe(&c)?;
-    let create = k.prepare_change(&c, &observed, "deployment")?;
+    let create = legacy::prepare(&mut k, &c, &observed, "deployment")?;
     assert!(k.execute_change(&c, &create).is_err());
     c.interrupted = Some(create);
     let path = "/apis/apps/v1/namespaces/test/deployments/app";
@@ -516,7 +531,7 @@ fn failed_deployment_allows_correction_and_interrupted_ownership_recovery() -> R
     c.revision = "fixed".into();
     let observed = k.observe(&c)?;
     assert!(observed.drifted);
-    let change = k.prepare_change(&c, &observed, "correction")?;
+    let change = legacy::prepare(&mut k, &c, &observed, "correction")?;
     k.execute_change(&c, &change)?;
     assert_eq!(
         k.api.objects[path]["spec"]["template"]["spec"]["containers"][0]["image"],
@@ -535,7 +550,7 @@ fn statefulset_readiness_preserves_replica_and_generation_checks() -> Result<()>
         target: target(),
     };
     let observed = k.observe(&c)?;
-    let change = k.prepare_change(&c, &observed, "statefulset")?;
+    let change = legacy::prepare(&mut k, &c, &observed, "statefulset")?;
     c.inventory = k.execute_change(&c, &change)?.inventory;
     let path = "/apis/apps/v1/namespaces/test/statefulsets/app";
     for (status, expected) in [
@@ -573,7 +588,7 @@ fn interrupted_create_followed_by_removal_tracks_finalizers() -> Result<()> {
         target: target(),
     };
     let o = k.observe(&c)?;
-    let p = k.prepare_change(&c, &o, "in-flight")?;
+    let p = legacy::prepare(&mut k, &c, &o, "in-flight")?;
     assert!(k.execute_change(&c, &p).is_err());
     c.interrupted = Some(p);
     let recovered = k.observe(&c)?;
@@ -666,7 +681,7 @@ fn loopback_http_creation_update_and_delete_use_preconditioned_requests() -> Res
             c.artifact["items"][0]["data"]["value"] = json!(operation);
             c.artifact_sha256 = operation.into();
             let o = k.observe(&c)?;
-            let p = k.prepare_change(&c, &o, operation)?;
+            let p = legacy::prepare(&mut k, &c, &o, operation)?;
             let o = k.execute_change(&c, &p)?;
             assert!(o.exists && !o.drifted);
             c.inventory = o.inventory;
@@ -694,7 +709,7 @@ fn recovers_superseded_creation_before_pruning() -> Result<()> {
         target: target(),
     };
     let o = k.observe(&c)?;
-    let p = k.prepare_change(&c, &o, "lost")?;
+    let p = legacy::prepare(&mut k, &c, &o, "lost")?;
     assert!(k.execute_change(&c, &p).is_err());
     c.interrupted = Some(p);
     c.revision = "next".into();
@@ -711,7 +726,7 @@ fn recovers_superseded_creation_before_pruning() -> Result<()> {
             .is_some(),
         "Superseded creation must be recovered"
     );
-    let p = k.prepare_change(&c, &o, "next")?;
+    let p = legacy::prepare(&mut k, &c, &o, "next")?;
     assert_eq!(
         p.summary.deletes, 1,
         "Superseded creation must remain eligible for explicit pruning"
@@ -771,10 +786,10 @@ fn missing_uid_history_survives_denied_replacement_and_revision_change() -> Resu
     let remote = std::sync::Arc::new(std::sync::Mutex::new(FakeApi::default()));
     let mut backends: Registry = BTreeMap::from([(
         "cluster".into(),
-        Box::new(Kubernetes {
+        Box::new(legacy::BackendFixture(Kubernetes {
             api: SharedApi(remote.clone()),
             target: target(),
-        }) as Box<dyn Backend>,
+        })) as Box<dyn Backend>,
     )]);
     reconcile(
         &mut s,
@@ -792,12 +807,8 @@ fn missing_uid_history_survives_denied_replacement_and_revision_change() -> Resu
         &mut backends,
         &Options::default(),
     )?;
-    assert!(s
-        .unit("demo", "first")?
-        .unwrap()
-        .failure
-        .unwrap()
-        .contains("replacement"));
+    let failure = s.unit("demo", "first")?.unwrap().failure.unwrap();
+    assert!(failure.contains("replacement"), "{failure}");
     c.instance.display_name = Some("Harmless display change".into());
     c.revision = c.digest()?;
     s.submit(&c)?;
@@ -854,7 +865,7 @@ fn optional_empty_lists_follow_kubernetes_serialization() -> Result<()> {
         target: target(),
     };
     let o = k.observe(&c)?;
-    let p = k.prepare_change(&c, &o, "np")?;
+    let p = legacy::prepare(&mut k, &c, &o, "np")?;
     c.inventory = k.execute_change(&c, &p)?.inventory;
     let spec = k
         .api
@@ -881,7 +892,7 @@ fn saved_removal_plans_preserve_preconditions_and_finalizer_inventory() -> Resul
         target: target(),
     };
     let observed = k.observe(&c)?;
-    let create = k.prepare_change(&c, &observed, "create")?;
+    let create = legacy::prepare(&mut k, &c, &observed, "create")?;
     c.inventory = k.execute_change(&c, &create)?.inventory;
     let before = k.observe_removal(&c)?;
     let delete = k.prepare_removal(&c, &before, "approved-delete")?;
@@ -922,7 +933,7 @@ fn removal_recovers_a_partial_interrupted_create_and_ignores_absent_paths() -> R
         target: target(),
     };
     let before = k.observe(&c)?;
-    let create = k.prepare_change(&c, &before, "interrupted-create")?;
+    let create = legacy::prepare(&mut k, &c, &before, "interrupted-create")?;
     k.api.interrupt = true;
     assert!(k.execute_change(&c, &create).is_err());
     assert_eq!(k.api.objects.len(), 1);

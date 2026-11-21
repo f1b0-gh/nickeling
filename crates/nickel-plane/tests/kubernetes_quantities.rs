@@ -56,6 +56,7 @@ fn observe(desired: Value, mut actual: Value) -> Result<bool> {
         artifact_sha256: "artifact".into(),
         inventory: json!({path:{"path":path,"uid":"owned-uid","resourceVersion":"1","kind":kind,"name":"app"}}),
         interrupted: None,
+        recovery: None,
         work: std::path::PathBuf::new(),
         engine_version: None,
         provider_lock: None,
