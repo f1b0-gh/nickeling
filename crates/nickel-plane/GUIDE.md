@@ -285,6 +285,39 @@ OpenTofu targets require an absolute pinned binary, stable stack name and option
 private JSON environment file (`{"PROVIDER_TOKEN":"..."}`). Ambient environment
 and CLI configuration are cleared. Native state/plans may contain secrets and
 remain in private work folders; public diagnostics omit provider response bodies.
+Failures report the command phase and bounded process details (exit status,
+termination signal, timeout or output limit). Recognized input/configuration
+errors receive fixed category advice. Arbitrary provider messages are withheld:
+JSON diagnostic summaries can contain secrets, so these summaries do not promise
+free-text redaction.
+
+To retain additional details explicitly, set `"privateDiagnostics": true` in the
+OpenTofu target's `config` object in the existing `--targets` file. It defaults
+to false and has no environment override. This setting does not affect target
+identity or approve an operation. Failed commands then retain **potentially
+sensitive, unredacted** data under the unit work directory's
+`opentofu-diagnostics/`; the public failure reports only its generated filename.
+No diagnostics are collected by offline check/render/lock, no additional provider
+command is executed, and successful commands do not create logs.
+
+The directory is private (0700), files are exclusively created with 0600, and
+links or unsafe existing files are refused. Each unit retains at most 16 files
+and 8 MiB total, with a 1 MiB file ceiling. Each artifact stores the last 256 KiB of
+stderr and, for init/plan/apply, the last 256 KiB of JSON UI stdout, plus a header
+of at most 4096 bytes. Version/show stdout is omitted because it can contain
+complete state. The file starts with `NICKELING-OPENTOFU-DIAGNOSTICS 1`, then a
+JSON header with retained stream lengths and truncation markers, then the raw
+stdout and stderr bytes in that order. Timeouts/output limits mark incomplete
+capture. Payload bytes may be non-UTF-8 or contain terminal escapes; these files
+are private evidence, not safe public log attachments.
+
+When storage is full or unavailable, the original operation failure remains
+visible with a fixed diagnostic-storage notice. Files are never automatically
+rotated, overwritten or deleted; partial writes also consume quota. Stop the
+controller before archiving selected evidence to restore capacity. Disabling
+the setting preserves existing files. Private artifacts are never included in
+status JSON, database failure text or automatic CI uploads.
+
 Provider-specific environment names, `TF_VAR_*` and HTTP backend credentials are
 supported; process configuration/CLI override variables are rejected.
 
