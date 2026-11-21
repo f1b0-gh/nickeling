@@ -11,6 +11,27 @@ optional `nickel-plane` controller.
 Nickel defines configuration, Rust provides the tools, and Nix supplies pinned
 engines and build recipes.
 
+## Why Nickel?
+
+Infrastructure configuration often starts as a few YAML files. As environments
+and services multiply, copied manifests and layers of patches make it harder to
+see what is shared, what differs and whether a change is valid.
+
+[Nickel](https://nickel-lang.org/) makes configuration programmable:
+
+- **Reuse with functions.** Define a resource or a group of resources once, then
+  pass parameters for each service or environment instead of copying manifests.
+- **Compose small pieces.** Combine shared configuration, reusable libraries and
+  application-specific settings into a complete configuration.
+- **Catch mistakes with contracts.** Check parameters and resource shapes before
+  rendering. Nickeling supplies pinned Kubernetes contracts and OpenTofu provider
+  schemas so validation covers the target configuration as well as your inputs.
+
+The result is ordinary Kubernetes JSON manifests or OpenTofu JSON configuration,
+usable by the existing tools. Nickel stays in the configuration layer; the
+optional controller handles execution. The example below defines a reusable
+ConfigMap function with typed parameters.
+
 ## Choose a component
 
 | To… | Use… | Result |
