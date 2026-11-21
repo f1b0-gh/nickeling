@@ -41,10 +41,20 @@ pub struct ChangeSummary {
     pub updates: usize,
     pub deletes: usize,
     pub replacements: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub field_ownership_transfers: usize,
+}
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 impl ChangeSummary {
     pub fn changed(&self) -> bool {
-        self.creates + self.updates + self.deletes + self.replacements > 0
+        self.creates
+            + self.updates
+            + self.deletes
+            + self.replacements
+            + self.field_ownership_transfers
+            > 0
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

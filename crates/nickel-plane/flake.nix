@@ -6,6 +6,8 @@
     pkgs = import nixpkgs { inherit system; };
   in {
     packages.${system} = {
+      kind = pkgs.kind;
+      kubectl = pkgs.kubectl;
       nickel = pkgs.nickel;
       opentofu = pkgs.opentofu;
       opentofu-proxmox = pkgs.opentofu.withPlugins (p: [ p.bpg_proxmox ]);
