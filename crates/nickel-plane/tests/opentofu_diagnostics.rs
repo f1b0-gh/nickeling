@@ -43,6 +43,7 @@ fn context(work: &Path) -> Result<Context> {
         artifact_sha256: "hash".into(),
         inventory: Value::Null,
         interrupted: None,
+        recovery: None,
         work: work.into(),
         engine_version: Some("1.13.2".into()),
         provider_lock: None,

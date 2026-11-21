@@ -1,5 +1,7 @@
 #![allow(clippy::unwrap_used)]
 #![cfg(feature = "kubernetes")]
+#[path = "fixtures/kubernetes_legacy.rs"]
+mod legacy;
 use nickel_plane::{
     adapters::kubernetes::{Api, Kubernetes},
     backend::Backend,
@@ -26,12 +28,22 @@ struct Remote {
 }
 struct MemoryApi(Arc<Mutex<Remote>>);
 impl Api for MemoryApi {
-    fn request(&mut self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value)> {
-        if path.contains("dryRun=All") {
-            return Ok((200, body.unwrap().clone()));
-        }
+    fn request(
+        &mut self,
+        method: &str,
+        request_path: &str,
+        body: Option<&Value>,
+    ) -> Result<(u16, Value)> {
+        let dry = request_path.contains("dryRun=All");
+        let manager = request_path
+            .split("fieldManager=")
+            .nth(1)
+            .unwrap_or("fixture")
+            .split('&')
+            .next()
+            .unwrap();
+        let path = request_path.split('?').next().unwrap();
         let mut remote = self.0.lock().unwrap();
-        let path = path.split('?').next().unwrap();
         if method == "GET" {
             return Ok(remote
                 .objects
@@ -39,7 +51,7 @@ impl Api for MemoryApi {
                 .map(|v| (200, v.clone()))
                 .unwrap_or((404, Value::Null)));
         }
-        let body = body.unwrap().clone();
+        let body = body.unwrap();
         let route = if method == "POST" {
             format!("{path}/{}", body["metadata"]["name"].as_str().unwrap())
         } else {
@@ -55,36 +67,67 @@ impl Api for MemoryApi {
             {
                 return Ok((409, Value::Null));
             }
-            remote.objects.remove(&route);
-            remote.writes += 1;
-            if remote.interrupt {
-                remote.interrupt = false;
-                return Err(Error::Backend("interrupted deletion response".into()));
+            if !dry {
+                remote.objects.remove(&route);
+                remote.writes += 1;
+                if std::mem::take(&mut remote.interrupt) {
+                    return Err(Error::Backend("interrupted deletion response".into()));
+                }
             }
             return Ok((200, json!({})));
         }
-        let mut object = body;
-        if let Some(old) = remote.objects.get(&route) {
-            if object["metadata"]["uid"] != old["metadata"]["uid"]
-                || object["metadata"]["resourceVersion"] != old["metadata"]["resourceVersion"]
-            {
-                return Ok((409, Value::Null));
+        let mut object = if method == "POST" {
+            let mut object = body.clone();
+            object["metadata"]["uid"] = json!(format!("uid-{}", remote.writes + 1));
+            object["metadata"]["managedFields"] = json!([{"manager":manager,"operation":"Update","apiVersion":body["apiVersion"],"fieldsType":"FieldsV1","fieldsV1":{"f:data":{"f:value":{}}}}]);
+            object
+        } else {
+            let Some(old) = remote.objects.get(&route) else {
+                return Ok((404, Value::Null));
+            };
+            if let Some(patch) = body.as_array() {
+                let mut object = old.clone();
+                for action in patch {
+                    let pointer = action["path"].as_str().unwrap();
+                    match action["op"].as_str().unwrap() {
+                        "test" if object.pointer(pointer) != Some(&action["value"]) => {
+                            return Ok((422, Value::Null))
+                        }
+                        "test" => {}
+                        "replace" => {
+                            *object.pointer_mut(pointer).unwrap() = action["value"].clone()
+                        }
+                        _ => return Err(Error::Invalid("Unexpected binding fixture patch".into())),
+                    }
+                }
+                object
+            } else {
+                if body["metadata"]["uid"] != old["metadata"]["uid"]
+                    || body["metadata"]["resourceVersion"] != old["metadata"]["resourceVersion"]
+                {
+                    return Ok((409, Value::Null));
+                }
+                let mut object = old.clone();
+                object["data"] = body["data"].clone();
+                object["metadata"]["annotations"] = body["metadata"]["annotations"].clone();
+                object
+            }
+        };
+        object["metadata"]["resourceVersion"] = json!((remote.writes + 1).to_string());
+        if !dry {
+            remote.writes += 1;
+            if method == "POST" {
+                remote.creates.push(route.clone());
+            }
+            remote.objects.insert(route, object.clone());
+            if std::mem::take(&mut remote.interrupt) {
+                return Err(Error::Backend("interrupted response".into()));
             }
         }
-        remote.writes += 1;
-        if method == "POST" {
-            remote.creates.push(route.clone());
-            object["metadata"]["uid"] = json!(format!("uid-{}", remote.writes));
-        }
-        object["metadata"]["resourceVersion"] = json!(remote.writes.to_string());
-        remote.objects.insert(route, object.clone());
-        if remote.interrupt {
-            remote.interrupt = false;
-            return Err(Error::Backend("interrupted response".into()));
-        }
-        Ok((200, object))
+        Ok((if method == "POST" { 201 } else { 200 }, object))
     }
 }
+
 struct Validate;
 impl Validator for Validate {
     fn validate(&self, _: &Unit, value: &Value, base: &CompiledUnit) -> Result<CompiledUnit> {
@@ -99,6 +142,7 @@ struct Fixture {
     compiled: Compiled,
     remote: Arc<Mutex<Remote>>,
     target: KubernetesTarget,
+    historical_creation: bool,
 }
 impl Fixture {
     fn new() -> Result<Self> {
@@ -133,6 +177,7 @@ impl Fixture {
             store,
             compiled,
             remote: Arc::default(),
+            historical_creation: false,
             target: KubernetesTarget {
                 server: "https://cluster.example".into(),
                 namespace: "test".into(),
@@ -143,14 +188,22 @@ impl Fixture {
             },
         })
     }
+    fn historical() -> Result<Self> {
+        let mut fixture = Self::new()?;
+        fixture.historical_creation = true;
+        Ok(fixture)
+    }
     fn registry(&self) -> Registry {
-        BTreeMap::from([(
-            "cluster".into(),
-            Box::new(Kubernetes {
-                api: MemoryApi(self.remote.clone()),
-                target: self.target.clone(),
-            }) as Box<dyn Backend>,
-        )])
+        let backend = Kubernetes {
+            api: MemoryApi(self.remote.clone()),
+            target: self.target.clone(),
+        };
+        let backend: Box<dyn Backend> = if self.historical_creation {
+            Box::new(legacy::BackendFixture(backend))
+        } else {
+            Box::new(backend)
+        };
+        BTreeMap::from([("cluster".into(), backend)])
     }
     fn run(&mut self, options: Options) -> Result<()> {
         let mut registry = self.registry();
@@ -212,13 +265,13 @@ fn new_binding_survives_rotation_and_restart_without_changing_ownership() -> Res
     assert_eq!(before.inventory, after.inventory);
     assert_eq!(before.target_sha256, after.target_sha256);
     assert_eq!(owner, f.store.owner);
-    assert_eq!(f.remote.lock().unwrap().writes, 1);
+    assert_eq!(f.remote.lock().unwrap().writes, 2);
     Ok(())
 }
 
 #[test]
 fn legacy_binding_upgrade_is_explicit_verified_and_idempotent() -> Result<()> {
-    let mut f = Fixture::new()?;
+    let mut f = Fixture::historical()?;
     f.run(Options::default())?;
     f.legacy()?;
     let before = f.store.unit("bindings", "app")?.unwrap();
@@ -250,7 +303,7 @@ fn legacy_binding_upgrade_is_explicit_verified_and_idempotent() -> Result<()> {
 
 #[test]
 fn already_rotated_legacy_state_requires_exact_offline_proof_and_upgrade_flag() -> Result<()> {
-    let mut f = Fixture::new()?;
+    let mut f = Fixture::historical()?;
     f.run(Options::default())?;
     f.legacy()?;
     let proof = f.rotate()?;
@@ -291,7 +344,7 @@ fn upgrade_refuses_wrong_ca_endpoint_namespace_and_unknown_binding_version() -> 
         "symlink",
         "oversized",
     ] {
-        let mut f = Fixture::new()?;
+        let mut f = Fixture::historical()?;
         f.run(Options::default())?;
         f.legacy()?;
         match wrong {
@@ -371,7 +424,7 @@ fn rotation_invalidates_saved_create_and_removal_plans() -> Result<()> {
         .as_deref()
         .unwrap()
         .contains("stale"));
-    assert_eq!(f.remote.lock().unwrap().writes, 1);
+    assert_eq!(f.remote.lock().unwrap().writes, 2);
     f.run(Options {
         retry_failed: true,
         ..Options::default()
@@ -382,7 +435,7 @@ fn rotation_invalidates_saved_create_and_removal_plans() -> Result<()> {
 
 #[test]
 fn legacy_upgrade_preserves_partial_create_journal_and_recovered_uids() -> Result<()> {
-    let mut f = Fixture::new()?;
+    let mut f = Fixture::historical()?;
     let mut second = f.compiled.units["app"].artifact["items"][0].clone();
     second["metadata"]["name"] = json!("second");
     f.compiled.units.get_mut("app").unwrap().artifact["items"]
@@ -411,6 +464,19 @@ fn legacy_upgrade_preserves_partial_create_journal_and_recovered_uids() -> Resul
     f.run(upgrade())?;
     f.healthy()?;
     assert!(f.store.running("bindings", "app")?.is_none());
+    // The recovered historical Update owner is handed off first. The next
+    // ordinary cycle creates the remaining object; it must not recreate the UID.
+    assert_eq!(f.remote.lock().unwrap().creates.len(), 1);
+    assert_eq!(
+        f.remote.lock().unwrap().objects[&created_path]["metadata"]["uid"],
+        uid
+    );
+    f.run(Options {
+        retry_failed: true,
+        now: 200,
+        ..Options::default()
+    })?;
+    f.healthy()?;
     let remote = f.remote.lock().unwrap();
     assert_eq!(remote.creates.len(), 2);
     assert_eq!(remote.objects[&created_path]["metadata"]["uid"], uid);
@@ -428,7 +494,7 @@ fn legacy_upgrade_preserves_partial_create_journal_and_recovered_uids() -> Resul
 
 #[test]
 fn binding_upgrade_does_not_authorize_a_legacy_prepared_plan() -> Result<()> {
-    let mut f = Fixture::new()?;
+    let mut f = Fixture::historical()?;
     f.run(planning())?;
     f.legacy()?;
     let mut state = f.store.unit("bindings", "app")?.unwrap();
@@ -466,7 +532,7 @@ fn stable_bindings_still_refuse_endpoint_and_namespace_changes() -> Result<()> {
         }
         f.run(upgrade())?;
         assert!(f.store.unit("bindings", "app")?.unwrap().failure.is_some());
-        assert_eq!(f.remote.lock().unwrap().writes, 1);
+        assert_eq!(f.remote.lock().unwrap().writes, 2);
     }
     Ok(())
 }
@@ -509,7 +575,7 @@ fn saved_plans_and_public_state_expose_only_combined_execution_digests() -> Resu
 #[test]
 fn legacy_removal_upgrade_requires_proof_and_recovers_interrupted_deletion() -> Result<()> {
     for interrupt in [false, true] {
-        let mut f = Fixture::new()?;
+        let mut f = Fixture::historical()?;
         f.run(Options::default())?;
         f.legacy()?;
         let historical = f.store.unit("bindings", "app")?.unwrap().target_sha256;
