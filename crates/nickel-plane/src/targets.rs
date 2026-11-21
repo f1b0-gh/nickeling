@@ -9,6 +9,9 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OpenTofuTarget {
+    /// Retain bounded, potentially sensitive diagnostics privately on command failure.
+    #[serde(default)]
+    pub private_diagnostics: bool,
     pub binary: PathBuf,
     pub stack: String,
     #[serde(default)]

@@ -11,6 +11,8 @@ use std::{
     process::Command,
     time::Duration,
 };
+mod diagnostics;
+mod private_diagnostics;
 const OWNER: &str = "nickel_plane_ownership";
 pub struct OpenTofu {
     target: OpenTofuTarget,
@@ -180,22 +182,99 @@ impl OpenTofu {
         command.args(args);
         Ok(command)
     }
-    fn run(&self, context: &Context, args: &[&str]) -> Result<Vec<u8>> {
-        process::capture(
-            self.command(context, args)?,
+    fn failure(
+        &self,
+        context: &Context,
+        phase: diagnostics::Phase,
+        cause: diagnostics::Cause,
+        output: Option<&process::Captured>,
+    ) -> Error {
+        let categories = if phase.ui() {
+            output
+                .map(|o| {
+                    diagnostics::summarize_ui(
+                        &o.stdout,
+                        context.engine_version.as_deref().unwrap_or_default(),
+                    )
+                })
+                .unwrap_or_default()
+        } else {
+            diagnostics::Categories::default()
+        };
+        let artifact = if self.target.private_diagnostics {
+            private_diagnostics::retain(&context.work, phase, &cause, output)
+        } else {
+            diagnostics::Retention::Disabled
+        };
+        Error::Backend(diagnostics::format_failure(
+            phase,
+            &cause,
+            &categories,
+            &artifact,
+        ))
+    }
+    fn run(&self, context: &Context, args: &[&str]) -> Result<process::Captured> {
+        use diagnostics::{Cause, Phase};
+        use std::os::unix::process::ExitStatusExt;
+        let phase = match args.first().copied() {
+            Some("version") => Phase::Version,
+            Some("init") => Phase::Init,
+            Some("show") => Phase::Show,
+            Some("plan") => Phase::Plan,
+            Some("apply") => Phase::Apply,
+            _ => {
+                return Err(Error::Invalid(
+                    "Unsupported OpenTofu controller command".into(),
+                ))
+            }
+        };
+        let mut arguments = args.to_vec();
+        if phase.ui() {
+            arguments.insert(1, "-json");
+        }
+        let command = self
+            .command(context, &arguments)
+            .map_err(|_| self.failure(context, phase, Cause::Io, None))?;
+        let output = process::capture_outcome(
+            command,
             Duration::from_secs(self.target.timeout_seconds),
             16 * 1024 * 1024,
         )
-        .map_err(|_| {
-            Error::Backend(format!(
-                "OpenTofu {}",
-                args.first().copied().unwrap_or("operation")
-            ))
-        })
+        .map_err(|error| {
+            let cause = match error {
+                nickel_util::error::Error::ProcessSpawn { .. } => Cause::Spawn,
+                nickel_util::error::Error::MissingPipe { .. } => Cause::MissingPipe,
+                _ => Cause::Io,
+            };
+            self.failure(context, phase, cause, None)
+        })?;
+        let cause = match &output.completion {
+            process::Completion::Exited(status) if status.success() => return Ok(output),
+            process::Completion::Exited(status) => status
+                .code()
+                .map(Cause::Exit)
+                .unwrap_or_else(|| Cause::Signal(status.signal().unwrap_or(0))),
+            process::Completion::TimedOut => Cause::Timeout(self.target.timeout_seconds),
+            process::Completion::OutputLimit { stream } => {
+                Cause::OutputLimit(*stream, 16 * 1024 * 1024)
+            }
+        };
+        Err(self.failure(context, phase, cause, Some(&output)))
     }
     fn json(&self, context: &Context, args: &[&str]) -> Result<Value> {
-        nickel_util::json::parse(&self.run(context, args)?)
-            .map_err(|_| Error::Backend("OpenTofu JSON response".into()))
+        let output = self.run(context, args)?;
+        nickel_util::json::parse(&output.stdout).map_err(|_| {
+            self.failure(
+                context,
+                if args.first() == Some(&"version") {
+                    diagnostics::Phase::Version
+                } else {
+                    diagnostics::Phase::Show
+                },
+                diagnostics::Cause::InvalidJson,
+                Some(&output),
+            )
+        })
     }
     fn prepare_workspace(&self, context: &Context) -> Result<String> {
         let dir = files::open_directory(&context.work)?;

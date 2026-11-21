@@ -11,6 +11,7 @@ fn native_saved_plans_preserve_state_identity_and_protect_sensitive_outputs() ->
     let binary = std::env::var_os("TOFU_BIN")
         .ok_or_else(|| Error::Invalid("Set TOFU_BIN to pinned OpenTofu 1.13.2".into()))?;
     let target = OpenTofuTarget {
+        private_diagnostics: false,
         binary: binary.into(),
         stack: "fixture".into(),
         credentials: None,
@@ -100,6 +101,7 @@ fn rejects_unlocked_remote_backends() -> Result<()> {
         ("s3", json!({"bucket":"state","key":"stack"})),
     ] {
         assert!(OpenTofu::new(OpenTofuTarget {
+            private_diagnostics: false,
             binary: binary.clone(),
             stack: "fixture".into(),
             credentials: None,
@@ -122,6 +124,7 @@ fn explicit_native_lock_migration_preserves_provider_resource_identity() -> Resu
         Error::Invalid("Set TOFU_LOCAL_BIN to pinned OpenTofu with Random 3.9.1".into())
     })?;
     let mut backend = OpenTofu::new(OpenTofuTarget {
+        private_diagnostics: false,
         binary: binary.into(),
         stack: "random".into(),
         credentials: None,
