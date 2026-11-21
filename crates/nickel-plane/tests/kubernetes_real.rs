@@ -279,3 +279,202 @@ fn real_controller_recognizes_normalized_cpu_quantity_without_permanent_drift() 
     );
     Ok(())
 }
+
+fn storage_claim_spec() -> Value {
+    // Explicitly disable default StorageClass selection; this test provisions no storage.
+    json!({"accessModes":["ReadWriteOnce"],"storageClassName":"",
+        "resources":{"requests":{"storage":"1024Mi"},"limits":{"storage":"1024Mi"}}})
+}
+
+fn storage_workload(name: &str, kind: &str) -> Value {
+    let resources = json!({
+        "requests":{"cpu":"1000m","memory":"1024Mi","ephemeral-storage":"1024Mi"},
+        "limits":{"cpu":"1000m","memory":"1024Mi","ephemeral-storage":"1024Mi"}
+    });
+    let mut workload = json!({"apiVersion":"apps/v1","kind":kind,
+    "metadata":{"name":name,"namespace":"nickeling-api"},"spec":{
+        "replicas":0,"selector":{"matchLabels":{"app":name}},"template":{
+            "metadata":{"labels":{"app":name}},"spec":{
+                "containers":[{"name":"app","image":"example.invalid/not-pulled:test","resources":resources}],
+                "initContainers":[{"name":"init","image":"example.invalid/not-pulled:test","resources":resources}],
+                "volumes":[{"name":"scratch","emptyDir":{"sizeLimit":"1024Mi"}},
+                    {"name":"ephemeral","ephemeral":{"volumeClaimTemplate":{"spec":storage_claim_spec()}}}]
+            }
+        }
+    }});
+    if kind == "StatefulSet" {
+        workload["spec"]["serviceName"] = json!("quantity-headless");
+        workload["spec"]["volumeClaimTemplates"] = json!([
+            {"metadata":{"name":"data"},"spec":storage_claim_spec()}
+        ]);
+    }
+    workload
+}
+
+fn assert_canonical_cpu_memory(actual: &Value) {
+    for container in ["containers", "initContainers"] {
+        for bound in ["requests", "limits"] {
+            assert_eq!(
+                actual["spec"]["template"]["spec"][container][0]["resources"][bound]["cpu"],
+                "1"
+            );
+            assert_eq!(
+                actual["spec"]["template"]["spec"][container][0]["resources"][bound]["memory"],
+                "1Gi"
+            );
+        }
+    }
+}
+
+const WORKLOAD_STORAGE_PATHS: &[&str] = &[
+    "/spec/template/spec/containers/0/resources/requests/ephemeral-storage",
+    "/spec/template/spec/containers/0/resources/limits/ephemeral-storage",
+    "/spec/template/spec/initContainers/0/resources/requests/ephemeral-storage",
+    "/spec/template/spec/initContainers/0/resources/limits/ephemeral-storage",
+    "/spec/template/spec/volumes/0/emptyDir/sizeLimit",
+    "/spec/template/spec/volumes/1/ephemeral/volumeClaimTemplate/spec/resources/requests/storage",
+    "/spec/template/spec/volumes/1/ephemeral/volumeClaimTemplate/spec/resources/limits/storage",
+];
+
+fn create_and_check_storage(
+    k: &mut Kubernetes<Http>,
+    c: &mut Context,
+    route: &str,
+    paths: &[&str],
+) -> Result<Value> {
+    let observed = k.observe(c)?;
+    let plan = k.prepare_change(c, &observed, "storage-create")?;
+    assert_eq!(plan.summary.creates, 1);
+    c.inventory = k.execute_change(c, &plan)?.inventory;
+    let (status, actual) = k.api.request("GET", route, None)?;
+    assert_eq!(status, 200);
+    for path in paths {
+        assert_eq!(
+            actual.pointer(path),
+            Some(&json!("1Gi")),
+            "API must canonicalize {path}"
+        );
+    }
+    assert!(
+        !k.observe(c)?.drifted,
+        "Canonical storage quantities must not cause drift"
+    );
+    Ok(actual)
+}
+
+#[test]
+#[ignore = "requires an owned kind cluster; use scripts/test-kind.py"]
+fn real_controller_recognizes_unbound_pvc_storage_quantities() -> Result<()> {
+    let mut k = connection()?;
+    let pvc = json!({"apiVersion":"v1","kind":"PersistentVolumeClaim",
+        "metadata":{"name":"quantity-pvc","namespace":"nickeling-api"},"spec":storage_claim_spec()});
+    let mut c = context(
+        "quantity-pvc",
+        json!({"apiVersion":"v1","kind":"List","items":[pvc]}),
+    )?;
+    let route = "/api/v1/namespaces/nickeling-api/persistentvolumeclaims/quantity-pvc";
+    create_and_check_storage(
+        &mut k,
+        &mut c,
+        route,
+        &[
+            "/spec/resources/requests/storage",
+            "/spec/resources/limits/storage",
+        ],
+    )?;
+    assert_eq!(k.observe(&c)?.readiness, Readiness::NotReady);
+    // An unbound claim is intentionally not resized: this checks drift, not provisioning.
+    c.artifact["items"][0]["spec"]["resources"]["requests"]["storage"] = json!("2Gi");
+    c.artifact_sha256 = "pvc-size-change".into();
+    assert!(k.observe(&c)?.drifted);
+    let (_, unchanged) = k.api.request("GET", route, None)?;
+    assert_eq!(unchanged["spec"]["resources"]["requests"]["storage"], "1Gi");
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires an owned kind cluster; use scripts/test-kind.py"]
+fn real_controller_recognizes_and_updates_deployment_storage_quantities() -> Result<()> {
+    let mut k = connection()?;
+    let mut c = context(
+        "quantity-deployment",
+        json!({"apiVersion":"v1","kind":"List",
+        "items":[storage_workload("quantity-deployment", "Deployment")]}),
+    )?;
+    let route = "/apis/apps/v1/namespaces/nickeling-api/deployments/quantity-deployment";
+    let actual = create_and_check_storage(&mut k, &mut c, route, WORKLOAD_STORAGE_PATHS)?;
+    assert_canonical_cpu_memory(&actual);
+    // Wait for the initial Deployment status write before freezing handoff preconditions.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let observed = k.observe(&c)?;
+        assert!(!observed.drifted);
+        if observed.readiness == Readiness::Ready {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Zero-replica Deployment did not settle"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    c.artifact["items"][0]["spec"]["template"]["spec"]["volumes"][0]["emptyDir"]["sizeLimit"] =
+        json!("2048Mi");
+    c.artifact_sha256 = "emptydir-size-change".into();
+    let observed = k.observe(&c)?;
+    assert!(observed.drifted);
+    let transfer = k.prepare_change(&c, &observed, "storage-transfer")?;
+    assert_eq!(transfer.summary.field_ownership_transfers, 1);
+    assert_eq!(transfer.summary.updates, 0);
+    let pending = k.execute_change(&c, &transfer)?;
+    assert!(pending.drifted);
+    assert_eq!(pending.readiness, Readiness::NotReady);
+    c.inventory = pending.inventory;
+    let (_, transferred) = k.api.request("GET", route, None)?;
+    assert_eq!(
+        actual["spec"], transferred["spec"],
+        "Ownership transfer must not change workload fields"
+    );
+    let observed = k.observe(&c)?;
+    let update = k.prepare_change(&c, &observed, "storage-update")?;
+    assert_eq!(update.summary.field_ownership_transfers, 0);
+    assert_eq!(update.summary.updates, 1);
+    c.inventory = k.execute_change(&c, &update)?.inventory;
+    let (_, actual) = k.api.request("GET", route, None)?;
+    assert_eq!(
+        actual["spec"]["template"]["spec"]["volumes"][0]["emptyDir"]["sizeLimit"],
+        "2Gi"
+    );
+    assert!(!k.observe(&c)?.drifted);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires an owned kind cluster; use scripts/test-kind.py"]
+fn real_controller_recognizes_statefulset_storage_template_quantities() -> Result<()> {
+    let mut k = connection()?;
+    let mut c = context(
+        "quantity-statefulset",
+        json!({"apiVersion":"v1","kind":"List",
+        "items":[storage_workload("quantity-statefulset", "StatefulSet")]}),
+    )?;
+    let route = "/apis/apps/v1/namespaces/nickeling-api/statefulsets/quantity-statefulset";
+    let mut paths = WORKLOAD_STORAGE_PATHS.to_vec();
+    paths.extend([
+        "/spec/volumeClaimTemplates/0/spec/resources/requests/storage",
+        "/spec/volumeClaimTemplates/0/spec/resources/limits/storage",
+    ]);
+    let actual = create_and_check_storage(&mut k, &mut c, route, &paths)?;
+    assert_canonical_cpu_memory(&actual);
+    // Claim templates are immutable. A changed desired size must remain drift, not be applied.
+    c.artifact["items"][0]["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]
+        ["storage"] = json!("2Gi");
+    c.artifact_sha256 = "claim-template-size-change".into();
+    assert!(k.observe(&c)?.drifted);
+    let (_, unchanged) = k.api.request("GET", route, None)?;
+    assert_eq!(
+        unchanged["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]["storage"],
+        "1Gi"
+    );
+    Ok(())
+}

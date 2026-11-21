@@ -1,4 +1,4 @@
-//! Bounded semantic comparison for CPU and memory quantities only.
+//! Bounded semantic comparison for explicitly supported native resource quantities.
 //!
 //! Parsing follows apimachinery v0.34.0 resource/quantity.go and suffix.go:
 //! decimal and binary suffixes, rounding away from zero to nano precision,
@@ -13,33 +13,45 @@ pub(super) fn equivalent(kind: &str, path: &str, desired: &str, actual: &str) ->
 }
 
 fn resource_field(kind: &str, path: &str) -> bool {
+    if kind == "PersistentVolumeClaim" {
+        return path.strip_prefix("/spec/").and_then(resource_name) == Some("storage");
+    }
     if !matches!(kind, "Deployment" | "StatefulSet") {
         return false;
     }
-    let Some(mut path) = path.strip_prefix("/spec/template/spec/") else {
-        return false;
-    };
-    if let Some((collection, rest)) = path.split_once('/') {
-        if matches!(
-            collection,
-            "containers" | "initContainers" | "ephemeralContainers"
-        ) {
-            let Some((index, rest)) = rest.split_once('/') else {
-                return false;
-            };
-            if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
-                return false;
-            }
-            path = rest;
+    if kind == "StatefulSet" {
+        if let Some(path) = indexed(path, "/spec/volumeClaimTemplates/") {
+            return path.strip_prefix("spec/").and_then(resource_name) == Some("storage");
         }
     }
-    matches!(
-        path,
-        "resources/requests/cpu"
-            | "resources/limits/cpu"
-            | "resources/requests/memory"
-            | "resources/limits/memory"
-    )
+    let Some(path) = path.strip_prefix("/spec/template/spec/") else {
+        return false;
+    };
+    if let Some(path) = indexed(path, "volumes/") {
+        return path == "emptyDir/sizeLimit"
+            || path
+                .strip_prefix("ephemeral/volumeClaimTemplate/spec/")
+                .and_then(resource_name)
+                == Some("storage");
+    }
+    for collection in ["containers/", "initContainers/", "ephemeralContainers/"] {
+        if let Some(path) = indexed(path, collection) {
+            return matches!(resource_name(path), Some("cpu" | "memory"))
+                || (collection != "ephemeralContainers/"
+                    && resource_name(path) == Some("ephemeral-storage"));
+        }
+    }
+    matches!(resource_name(path), Some("cpu" | "memory"))
+}
+
+fn indexed<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    let (index, rest) = path.strip_prefix(prefix)?.split_once('/')?;
+    (!index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())).then_some(rest)
+}
+
+fn resource_name(path: &str) -> Option<&str> {
+    let (bound, resource) = path.strip_prefix("resources/")?.split_once('/')?;
+    matches!(bound, "requests" | "limits").then_some(resource)
 }
 
 /// Return sign and integer nano-units without floating point or heap allocation.
@@ -294,5 +306,94 @@ mod tests {
         }
         let over_budget = "0".repeat(129);
         assert!(!equivalent("Deployment", CPU, &over_budget, "0"));
+    }
+    #[test]
+    fn storage_equivalence_is_scoped_to_contract_backed_paths() {
+        let mut cases = Vec::new();
+        for bound in ["requests", "limits"] {
+            cases.push((
+                "PersistentVolumeClaim",
+                format!("/spec/resources/{bound}/storage"),
+            ));
+            for index in ["0", "12"] {
+                cases.push((
+                    "StatefulSet",
+                    format!("/spec/volumeClaimTemplates/{index}/spec/resources/{bound}/storage"),
+                ));
+                for kind in ["Deployment", "StatefulSet"] {
+                    for container in ["containers", "initContainers"] {
+                        cases.push((kind, format!("/spec/template/spec/{container}/{index}/resources/{bound}/ephemeral-storage")));
+                    }
+                    cases.push((kind, format!("/spec/template/spec/volumes/{index}/ephemeral/volumeClaimTemplate/spec/resources/{bound}/storage")));
+                }
+            }
+        }
+        for kind in ["Deployment", "StatefulSet"] {
+            for index in ["0", "12"] {
+                cases.push((
+                    kind,
+                    format!("/spec/template/spec/volumes/{index}/emptyDir/sizeLimit"),
+                ));
+            }
+        }
+        for (kind, path) in cases {
+            for (desired, actual) in [("1024Mi", "1Gi"), ("1000M", "1G"), ("1073741824", "1Gi")] {
+                assert!(
+                    equivalent(kind, &path, desired, actual),
+                    "{kind} {path}: {desired} != {actual}"
+                );
+                assert!(
+                    equivalent(kind, &path, actual, desired),
+                    "{kind} {path}: asymmetric equality"
+                );
+            }
+            for (desired, actual) in [
+                ("1Gi", "1G"),
+                ("1Gi", "2Gi"),
+                ("1073741824", "1073741825"),
+                ("1Gi", "1 Gi"),
+            ] {
+                assert!(
+                    !equivalent(kind, &path, desired, actual),
+                    "{kind} {path}: lost real drift"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn storage_lookalikes_and_unsupported_paths_remain_exact() {
+        for (kind, path) in [
+            ("ConfigMap", "/data/storage"),
+            ("ConfigMap", "/spec/resources/requests/storage"),
+            ("PersistentVolume", "/spec/resources/requests/storage"),
+            ("PersistentVolumeClaim", "/spec/resources/requests/cpu"),
+            ("PersistentVolumeClaim", "/spec/resources/requests/memory"),
+            ("PersistentVolumeClaim", "/spec/resources/requests/example.com/storage"),
+            ("PersistentVolumeClaim", "/spec/resources/requests/storage/extra"),
+            ("Deployment", "/spec/volumeClaimTemplates/0/spec/resources/requests/storage"),
+            ("Deployment", "/spec/template/spec/resources/requests/ephemeral-storage"),
+            ("Deployment", "/spec/template/spec/ephemeralContainers/0/resources/requests/ephemeral-storage"),
+            ("Deployment", "/spec/template/spec/containers/0/resources/requests/storage"),
+            ("Deployment", "/spec/template/spec/containers/0/resources/requests/example.com/ephemeral-storage"),
+            ("Deployment", "/spec/template/spec/containers/-1/resources/requests/ephemeral-storage"),
+            ("Deployment", "/spec/template/spec/containers//resources/requests/ephemeral-storage"),
+            ("Deployment", "/spec/template/spec/containers/one/resources/requests/ephemeral-storage"),
+            ("Deployment", "/spec/template/spec/volumes/one/emptyDir/sizeLimit"),
+            ("Deployment", "/spec/template/spec/volumes/0/emptyDir/sizeLimit/extra"),
+            ("Deployment", "/spec/template/spec/volumes/0/sizeLimit"),
+            ("Deployment", "/spec/template/spec/volumes/0/ephemeral/volumeClaimTemplates/0/spec/resources/requests/storage"),
+            ("Deployment", "/spec/template/spec/volumes/0/ephemeral/volumeClaimTemplate/resources/requests/storage"),
+            ("StatefulSet", "/spec/volumeClaimTemplates//spec/resources/requests/storage"),
+            ("StatefulSet", "/spec/volumeClaimTemplates/-1/spec/resources/requests/storage"),
+            ("StatefulSet", "/spec/volumeClaimTemplates/one/spec/resources/requests/storage"),
+            ("StatefulSet", "/spec/volumeClaimTemplates/0/spec/resources/requests/storage/extra"),
+            ("StatefulSet", "/spec/volumeClaimTemplates/0/spec/resources/requests/cpu"),
+            ("Pod", "/spec/volumes/0/emptyDir/sizeLimit"),
+            ("Deployment", "/metadata/annotations/storage"),
+            ("Deployment", "/spec/template/spec/containers/0/env/0/value"),
+        ] {
+            assert!(!equivalent(kind, path, "1024Mi", "1Gi"), "{kind}: {path}");
+        }
     }
 }

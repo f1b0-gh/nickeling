@@ -262,10 +262,19 @@ Deployment completion requires the desired total, updated, ready and available
 replica counts, including scale-to-zero. A current-generation `Progressing=False`
 condition reports failed readiness without exposing the server's message.
 Ownership remains observable, and a corrected configuration can still be applied.
-For Deployment and StatefulSet CPU/memory requests and limits, drift comparison
-recognizes equivalent numeric quantity spellings such as `1000m` and `1`.
-Unsupported quantities beyond the bounded parser remain conservative drift;
-normalization of other schema fields is not generally covered.
+Quantity drift comparison recognizes equivalent spellings such as `1000m` and
+`1`, or `1024Mi` and `1Gi`, at these native fields:
+
+- Deployment/StatefulSet CPU and memory requests/limits, including pod-level resources.
+- Regular and init-container ephemeral-storage requests/limits in those workloads.
+- PersistentVolumeClaim storage requests/limits, StatefulSet volumeClaimTemplates,
+  and generic ephemeral volume claim templates within those workloads.
+- Deployment/StatefulSet emptyDir volume sizeLimit.
+
+Other strings retain exact comparison, and quantities beyond the bounded parser
+remain conservative drift. Equivalent quantities do not authorize resizing or
+make immutable fields mutable. Readiness and storage provisioning are separate
+from drift; normalization of other schema fields is not generally covered.
 
 A bounded watch on one known object per unit supplies scheduling hints. Expired
 watches trigger coalesced observation; transport failures wait for periodic full
