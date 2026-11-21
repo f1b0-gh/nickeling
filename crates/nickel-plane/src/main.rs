@@ -19,6 +19,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+mod scheduling;
+
 #[derive(Parser)]
 #[command(
     version,
@@ -262,12 +264,13 @@ fn run_runtime(
         };
         first = false;
         let start = std::time::Instant::now();
-        while start.elapsed() < Duration::from_secs(interval) && !flag.load(Ordering::SeqCst) {
-            if reconcile::poll_events(&store, &compiled, &mut registry)? {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(250));
-        }
+        scheduling::wait_for_resync(
+            Duration::from_secs(interval),
+            || flag.load(Ordering::SeqCst),
+            || reconcile::poll_events(&store, &compiled, &mut registry),
+            || start.elapsed(),
+            std::thread::sleep,
+        )?;
     }
 }
 fn run(cli: Cli) -> Result<()> {

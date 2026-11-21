@@ -20,6 +20,7 @@ pub struct OutputValue {
 pub enum Readiness {
     Ready,
     NotReady,
+    Failed,
     #[default]
     Unsupported,
 }
@@ -92,6 +93,25 @@ pub trait Backend {
     ) -> Result<PreparedChange>;
     fn execute_change(&mut self, context: &Context, change: &PreparedChange)
         -> Result<Observation>;
+    /// Observe owned resources without requiring the removed configuration to be healthy.
+    fn observe_removal(&mut self, context: &Context) -> Result<Observation> {
+        self.observe(context)
+    }
+    fn prepare_removal(
+        &mut self,
+        _context: &Context,
+        _observed: &Observation,
+        _operation: &str,
+    ) -> Result<PreparedChange> {
+        Err(Error::Unsupported("backend deletion planning".into()))
+    }
+    fn execute_removal(
+        &mut self,
+        _context: &Context,
+        _change: &PreparedChange,
+    ) -> Result<Observation> {
+        Err(Error::Unsupported("backend saved deletion".into()))
+    }
     fn remove(&mut self, _context: &Context, _observed: &Observation) -> Result<Observation> {
         Err(Error::Unsupported("backend deletion".into()))
     }

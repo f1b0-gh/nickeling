@@ -78,7 +78,7 @@ pub fn parse(bytes: &[u8]) -> Result<Value> {
 pub fn parse_with_limits(bytes: &[u8], max_bytes: usize, max_array_items: usize) -> Result<Value> {
     if bytes.len() > max_bytes {
         return Err(Error::InvalidInput {
-            message: format!("JSON dépasse {max_bytes} octets"),
+            message: format!("JSON exceeds {max_bytes} bytes"),
         });
     }
     let mut decoder = serde_json::Deserializer::from_slice(bytes);

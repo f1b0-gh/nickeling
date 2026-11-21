@@ -41,6 +41,9 @@ impl Api for FakeApi {
             if old["metadata"]["uid"] != body["preconditions"]["uid"] {
                 return Ok((409, Value::Null));
             }
+            if old["metadata"]["resourceVersion"] != body["preconditions"]["resourceVersion"] {
+                return Ok((409, Value::Null));
+            }
             if !self.delay_delete {
                 self.objects.remove(route);
             }
@@ -293,8 +296,7 @@ fn array_drift_and_workload_readiness_require_observed_state() -> Result<()> {
         .get_mut("/apis/apps/v1/namespaces/test/deployments/app")
         .ok_or_else(|| Error::Invalid("deployment".into()))?;
     obj["metadata"]["generation"] = json!(2);
-    obj["status"] =
-        json!({"observedGeneration":1,"readyReplicas":1,"updatedReplicas":1,"availableReplicas":1});
+    obj["status"] = json!({"observedGeneration":1,"replicas":1,"readyReplicas":1,"updatedReplicas":1,"availableReplicas":1});
     assert_eq!(k.observe(&c)?.readiness, Readiness::NotReady);
     k.api
         .objects
@@ -302,6 +304,169 @@ fn array_drift_and_workload_readiness_require_observed_state() -> Result<()> {
         .ok_or_else(|| Error::Invalid("deployment".into()))?["status"]["observedGeneration"] =
         json!(2);
     assert_eq!(k.observe(&c)?.readiness, Readiness::Ready);
+    Ok(())
+}
+
+fn observe_deployment(replicas: u64, status: Value) -> Result<Observation> {
+    let temp = tempfile::tempdir()?;
+    let mut c = context(temp.path().into())?;
+    c.artifact["items"][0] = json!({"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"app","namespace":"test"},"spec":{"replicas":replicas}});
+    let mut k = Kubernetes {
+        api: FakeApi::default(),
+        target: target(),
+    };
+    let observed = k.observe(&c)?;
+    let change = k.prepare_change(&c, &observed, "deployment")?;
+    c.inventory = k.execute_change(&c, &change)?.inventory;
+    let object = k
+        .api
+        .objects
+        .get_mut("/apis/apps/v1/namespaces/test/deployments/app")
+        .unwrap();
+    object["metadata"]["generation"] = json!(2);
+    object["status"] = status;
+    k.observe(&c)
+}
+
+#[test]
+fn deployment_readiness_waits_for_old_replicas_and_scale_down() -> Result<()> {
+    for (replicas, status, expected) in [
+        (
+            1,
+            json!({"observedGeneration":2,"replicas":2,"updatedReplicas":1,"readyReplicas":2,"availableReplicas":2}),
+            Readiness::NotReady,
+        ),
+        (
+            1,
+            json!({"observedGeneration":2,"replicas":2,"updatedReplicas":2,"readyReplicas":2,"availableReplicas":2}),
+            Readiness::NotReady,
+        ),
+        (
+            0,
+            json!({"observedGeneration":2,"replicas":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1}),
+            Readiness::NotReady,
+        ),
+        (0, json!({"observedGeneration":2}), Readiness::Ready),
+        (
+            1,
+            json!({"observedGeneration":2,"replicas":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1}),
+            Readiness::Ready,
+        ),
+        (
+            1,
+            json!({"observedGeneration":2,"replicas":1,"updatedReplicas":1,"readyReplicas":1}),
+            Readiness::NotReady,
+        ),
+        (
+            1,
+            json!({"observedGeneration":1,"replicas":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1}),
+            Readiness::NotReady,
+        ),
+    ] {
+        assert_eq!(
+            observe_deployment(replicas, status.clone())?.readiness,
+            expected,
+            "replicas={replicas}, status={status}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn deployment_progress_failure_preserves_observation_and_is_generation_bound() -> Result<()> {
+    for reason in ["ProgressDeadlineExceeded", "ReplicaSetCreateError"] {
+        let mut status = json!({"observedGeneration":2,"replicas":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"conditions":[{"type":"Progressing","status":"False","reason":reason,"message":"private server diagnostic"}]});
+        let observed = observe_deployment(1, status.clone())?;
+        assert_eq!(serde_json::to_value(observed.readiness)?, json!("failed"));
+        assert!(observed.exists);
+        assert!(!observed.inventory.as_object().unwrap().is_empty());
+        status["observedGeneration"] = json!(1);
+        assert_eq!(
+            observe_deployment(1, status.clone())?.readiness,
+            Readiness::NotReady
+        );
+        status["observedGeneration"] = json!(2);
+        status["conditions"][0]["status"] = json!("True");
+        assert_eq!(observe_deployment(1, status)?.readiness, Readiness::Ready);
+    }
+    Ok(())
+}
+
+#[test]
+fn failed_deployment_allows_correction_and_interrupted_ownership_recovery() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut c = context(temp.path().into())?;
+    c.artifact["items"][0] = json!({"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"app","namespace":"test"},"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"app","image":"broken"}]}}}});
+    let mut k = Kubernetes {
+        api: FakeApi {
+            interrupt: true,
+            ..Default::default()
+        },
+        target: target(),
+    };
+    let observed = k.observe(&c)?;
+    let create = k.prepare_change(&c, &observed, "deployment")?;
+    assert!(k.execute_change(&c, &create).is_err());
+    c.interrupted = Some(create);
+    let path = "/apis/apps/v1/namespaces/test/deployments/app";
+    let object = k.api.objects.get_mut(path).unwrap();
+    object["metadata"]["generation"] = json!(1);
+    object["status"] = json!({"observedGeneration":1,"replicas":1,"conditions":[{"type":"Progressing","status":"False","message":"private diagnostic"}]});
+    let recovered = k.observe(&c)?;
+    assert_eq!(serde_json::to_value(recovered.readiness)?, json!("failed"));
+    c.inventory = recovered.inventory;
+    c.interrupted = None;
+    c.artifact["items"].as_array_mut().unwrap().push(json!({"apiVersion":"networking.k8s.io/v1","kind":"Ingress","metadata":{"name":"pending","namespace":"test"},"spec":{}}));
+    assert_eq!(
+        serde_json::to_value(k.observe(&c)?.readiness)?,
+        json!("failed")
+    );
+    c.artifact["items"][0]["spec"]["template"]["spec"]["containers"][0]["image"] = json!("fixed");
+    c.artifact_sha256 = "fixed".into();
+    c.revision = "fixed".into();
+    let observed = k.observe(&c)?;
+    assert!(observed.drifted);
+    let change = k.prepare_change(&c, &observed, "correction")?;
+    k.execute_change(&c, &change)?;
+    assert_eq!(
+        k.api.objects[path]["spec"]["template"]["spec"]["containers"][0]["image"],
+        "fixed"
+    );
+    Ok(())
+}
+
+#[test]
+fn statefulset_readiness_preserves_replica_and_generation_checks() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut c = context(temp.path().into())?;
+    c.artifact["items"][0] = json!({"apiVersion":"apps/v1","kind":"StatefulSet","metadata":{"name":"app","namespace":"test"},"spec":{"replicas":1}});
+    let mut k = Kubernetes {
+        api: FakeApi::default(),
+        target: target(),
+    };
+    let observed = k.observe(&c)?;
+    let change = k.prepare_change(&c, &observed, "statefulset")?;
+    c.inventory = k.execute_change(&c, &change)?.inventory;
+    let path = "/apis/apps/v1/namespaces/test/statefulsets/app";
+    for (status, expected) in [
+        (
+            json!({"observedGeneration":1,"readyReplicas":1,"updatedReplicas":1}),
+            Readiness::Ready,
+        ),
+        (
+            json!({"observedGeneration":0,"readyReplicas":1,"updatedReplicas":1}),
+            Readiness::NotReady,
+        ),
+        (
+            json!({"observedGeneration":1,"readyReplicas":1}),
+            Readiness::NotReady,
+        ),
+    ] {
+        let object = k.api.objects.get_mut(path).unwrap();
+        object["metadata"]["generation"] = json!(1);
+        object["status"] = status;
+        assert_eq!(k.observe(&c)?.readiness, expected);
+    }
     Ok(())
 }
 
@@ -614,5 +779,71 @@ fn optional_empty_lists_follow_kubernetes_serialization() -> Result<()> {
         !k.observe(&c)?.drifted,
         "Omitted empty optional lists are equivalent"
     );
+    Ok(())
+}
+
+#[test]
+fn saved_removal_plans_preserve_preconditions_and_finalizer_inventory() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut c = context(temp.path().into())?;
+    let mut k = Kubernetes {
+        api: FakeApi::default(),
+        target: target(),
+    };
+    let observed = k.observe(&c)?;
+    let create = k.prepare_change(&c, &observed, "create")?;
+    c.inventory = k.execute_change(&c, &create)?.inventory;
+    let before = k.observe_removal(&c)?;
+    let delete = k.prepare_removal(&c, &before, "approved-delete")?;
+    assert_eq!(delete.summary.deletes, 1);
+    assert_eq!(delete.summary.creates, 0);
+    assert_eq!(delete.summary.updates, 0);
+    assert_eq!(k.api.writes, 1);
+    let path = "/api/v1/namespaces/test/configmaps/settings";
+    k.api.objects.get_mut(path).unwrap()["metadata"]["resourceVersion"] = json!("changed");
+    assert!(k.execute_removal(&c, &delete).is_err());
+    assert_eq!(k.api.writes, 1);
+    let before = k.observe_removal(&c)?;
+    let delete = k.prepare_removal(&c, &before, "fresh-delete")?;
+    k.api.delay_delete = true;
+    let pending = k.execute_removal(&c, &delete)?;
+    assert!(
+        pending.exists,
+        "Finalizers must keep upstream resources protected"
+    );
+    assert!(pending.inventory.as_object().unwrap().contains_key(path));
+    c.inventory = pending.inventory;
+    k.api.objects.remove(path);
+    let after = k.observe_removal(&c)?;
+    assert!(!after.exists);
+    assert_eq!(after.inventory, json!({}));
+    Ok(())
+}
+
+#[test]
+fn removal_recovers_a_partial_interrupted_create_and_ignores_absent_paths() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut c = context(temp.path().into())?;
+    let mut other = c.artifact["items"][0].clone();
+    other["metadata"]["name"] = json!("settings-b");
+    c.artifact["items"].as_array_mut().unwrap().push(other);
+    let mut k = Kubernetes {
+        api: FakeApi::default(),
+        target: target(),
+    };
+    let before = k.observe(&c)?;
+    let create = k.prepare_change(&c, &before, "interrupted-create")?;
+    k.api.interrupt = true;
+    assert!(k.execute_change(&c, &create).is_err());
+    assert_eq!(k.api.objects.len(), 1);
+    c.interrupted = Some(create);
+    let before = k.observe_removal(&c)?;
+    let delete = k.prepare_removal(&c, &before, "remove-partial")?;
+    assert_eq!(delete.summary.deletes, 1);
+    c.inventory = before.inventory;
+    let after = k.execute_removal(&c, &delete)?;
+    assert!(!after.exists);
+    assert!(k.api.objects.is_empty());
+    assert_eq!(k.api.writes, 2);
     Ok(())
 }

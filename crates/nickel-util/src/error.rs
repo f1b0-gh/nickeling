@@ -2,60 +2,60 @@
 use std::{ffi::OsString, io, path::PathBuf, process::ExitStatus, time::Duration};
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("Configuration invalide : {message}")]
+    #[error("Invalid configuration: {message}")]
     InvalidConfiguration { message: String },
-    #[error("Chemin invalide {path:?} : {reason}")]
+    #[error("Invalid path {path:?}: {reason}")]
     InvalidPath { path: PathBuf, reason: &'static str },
-    #[error("Entrée refusée : {message}")]
+    #[error("Input rejected: {message}")]
     InvalidInput { message: String },
-    #[error("Erreur d’E/S : {0}")]
+    #[error("I/O error: {0}")]
     Io(#[from] io::Error),
-    #[error("{path:?} : {source}")]
+    #[error("{path:?}: {source}")]
     PathIo {
         path: PathBuf,
         #[source]
         source: io::Error,
     },
-    #[error("JSON invalide : {0}")]
+    #[error("Invalid JSON: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("Sortie non UTF-8 : {0}")]
+    #[error("Non-UTF-8 output: {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
-    #[error("Octet nul dans un chemin : {0}")]
+    #[error("NUL byte in path: {0}")]
     Nul(#[from] std::ffi::NulError),
-    #[error("Impossible de lancer {program:?} : {source}")]
+    #[error("Cannot start {program:?}: {source}")]
     ProcessSpawn {
         program: OsString,
         #[source]
         source: io::Error,
     },
-    #[error("Échec {program:?} ({status}) : {stderr}")]
+    #[error("{program:?} failed ({status}): {stderr}")]
     ProcessExit {
         program: OsString,
         status: ExitStatus,
         stderr: String,
     },
-    #[error("Délai de {program:?} dépassé ({timeout:?})")]
+    #[error("{program:?} timed out ({timeout:?})")]
     ProcessTimeout {
         program: OsString,
         timeout: Duration,
     },
-    #[error("Sortie {stream} de {program:?} trop volumineuse (limite {limit} octets)")]
+    #[error("{stream} output from {program:?} exceeds the {limit}-byte limit")]
     ProcessOutputLimit {
         program: OsString,
         stream: &'static str,
         limit: usize,
     },
-    #[error("Pipe {stream} absent pour {program:?}")]
+    #[error("Missing {stream} pipe for {program:?}")]
     MissingPipe {
         program: OsString,
         stream: &'static str,
     },
-    #[error("Évaluation Nickel refusée : {source}")]
+    #[error("Nickel evaluation rejected: {source}")]
     Nickel {
         #[source]
         source: Box<Error>,
     },
-    #[error("{message} : {source}")]
+    #[error("{message}: {source}")]
     Context {
         message: String,
         #[source]

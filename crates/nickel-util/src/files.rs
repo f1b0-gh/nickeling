@@ -31,7 +31,7 @@ fn open_entry_kind(
 ) -> Result<File> {
     ensure!(
         !name.is_empty() && name != "." && name != ".." && !name.as_bytes().contains(&b'/'),
-        "Un seul composant de chemin normal requis"
+        "A single normal path component is required"
     );
     let name = CString::new(name.as_bytes())?;
     let flags = if path_only {
@@ -63,7 +63,7 @@ fn open_entry_kind(
             Some(false) => metadata.is_file(),
             None => metadata.is_file() || metadata.is_dir(),
         },
-        "Type de fichier interdit"
+        "File type not allowed"
     );
     Ok(file)
 }
@@ -87,7 +87,7 @@ pub fn open_directory_path(path: &Path) -> Result<File> {
             _ => {
                 return Err(Error::InvalidPath {
                     path: path.clone(),
-                    reason: "Chemin non normalisé",
+                    reason: "Path is not normalized",
                 })
             }
         }
@@ -119,33 +119,33 @@ pub fn open_regular(path: &Path) -> Result<File> {
     let path = absolute(path)?;
     let parent = open_directory(path.parent().ok_or_else(|| Error::InvalidPath {
         path: path.clone(),
-        reason: "Parent absent",
+        reason: "Missing parent",
     })?)?;
     open_child(
         &parent,
         path.file_name().ok_or_else(|| Error::InvalidPath {
             path: path.clone(),
-            reason: "Nom absent",
+            reason: "Missing name",
         })?,
         false,
     )
-    .map_err(|e| e.context(format!("Fichier régulier requis : {}", path.display())))
+    .map_err(|e| e.context(format!("Regular file required: {}", path.display())))
 }
 pub fn read_file(file: File, limit: usize) -> Result<Vec<u8>> {
     let before = file.metadata()?;
-    ensure!(before.len() <= limit as u64, "Fichier trop volumineux");
+    ensure!(before.len() <= limit as u64, "File is too large");
     let mut bytes = Vec::new();
     let mut limited = file.take((limit as u64).saturating_add(1));
     limited.read_to_end(&mut bytes)?;
     let after = limited.get_ref().metadata()?;
-    ensure!(bytes.len() <= limit, "Fichier trop volumineux");
+    ensure!(bytes.len() <= limit, "File is too large");
     ensure!(
         before.len() == after.len()
             && before.mtime() == after.mtime()
             && before.mtime_nsec() == after.mtime_nsec()
             && before.ctime() == after.ctime()
             && before.ctime_nsec() == after.ctime_nsec(),
-        "Fichier modifié pendant lecture"
+        "File changed while being read"
     );
     Ok(bytes)
 }
@@ -169,16 +169,16 @@ pub fn publish_json(path: &Path, value: &impl serde::Serialize, replace: bool) -
     let path = absolute(path)?;
     let parent = open_directory(path.parent().ok_or_else(|| Error::InvalidPath {
         path: path.clone(),
-        reason: "Parent absent",
+        reason: "Missing parent",
     })?)?;
     let directory = PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd()));
     let target = directory.join(path.file_name().ok_or_else(|| Error::InvalidPath {
         path: path.clone(),
-        reason: "Nom de fichier absent",
+        reason: "Missing file name",
     })?);
     if replace {
         match std::fs::symlink_metadata(&target) {
-            Ok(meta) => ensure!(meta.is_file(), "Destination non régulière"),
+            Ok(meta) => ensure!(meta.is_file(), "Destination is not a regular file"),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
             Err(e) => return Err(e.into()),
         }

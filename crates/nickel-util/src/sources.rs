@@ -24,7 +24,7 @@ pub fn relative_path(s: &str) -> Result<()> {
         && s.split('/').all(|c| !c.is_empty() && c != "." && c != ".."))
     {
         return Err(Error::InvalidConfiguration {
-            message: format!("Chemin relatif normalisé requis : {s}"),
+            message: format!("Normalized relative path required: {s}"),
         });
     }
     Ok(())
@@ -119,9 +119,9 @@ struct Collector<'a> {
 }
 impl Collector<'_> {
     fn visit(&mut self, file: File, name: &str, depth: usize) -> Result<()> {
-        ensure!(depth <= 64, "Sources trop imbriquées");
+        ensure!(depth <= 64, "Source nesting limit exceeded");
         self.entries += 1;
-        ensure!(self.entries <= 20000, "Trop d’entrées sources");
+        ensure!(self.entries <= 20000, "Too many source entries");
         let meta = file.metadata()?;
         if meta.is_dir() {
             for entry in fs::read_dir(format!("/proc/self/fd/{}", file.as_raw_fd()))? {
@@ -129,7 +129,7 @@ impl Collector<'_> {
                 let child = entry.file_name();
                 let child_name = child
                     .to_str()
-                    .ok_or_else(|| invalid("Nom source non UTF-8".into()))?;
+                    .ok_or_else(|| invalid("Non-UTF-8 source name".into()))?;
                 let path = format!("{name}/{child_name}");
                 if excluded_entry(&path, self.spec, true) {
                     continue;
@@ -151,12 +151,12 @@ impl Collector<'_> {
             if self.files.contains_key(name) {
                 return Ok(());
             }
-            ensure!(self.files.len() < 5000, "Maximum 5000 fichiers sources");
+            ensure!(self.files.len() < 5000, "Maximum of 5000 source files");
             let data = files::read_file(file, 16 * 1024 * 1024)?;
             self.total += data.len();
             ensure!(
                 self.total <= 256 * 1024 * 1024,
-                "Budget total sources dépassé"
+                "Total source byte budget exceeded"
             );
             let record = FileRecord {
                 sha256: files::hash(&data),
@@ -166,7 +166,7 @@ impl Collector<'_> {
                 let target = destination.join(name);
                 let parent = target
                     .parent()
-                    .ok_or_else(|| invalid("Parent source absent".into()))?;
+                    .ok_or_else(|| invalid("Missing source parent".into()))?;
                 fs::create_dir_all(parent)?;
                 // Destination is a newly allocated, host-private staging directory.
                 let mut out = std::fs::OpenOptions::new()
@@ -193,7 +193,7 @@ pub fn snapshot(root: &Path, spec: &Sources, destination: Option<&Path>) -> Resu
             fs::read_dir(format!("/proc/self/fd/{}", dir.as_raw_fd()))?
                 .next()
                 .is_none(),
-            "Staging sources non vide"
+            "Source staging directory is not empty"
         );
     }
     let mut collector = Collector {
@@ -209,7 +209,7 @@ pub fn snapshot(root: &Path, spec: &Sources, destination: Option<&Path>) -> Resu
     for name in &spec.include {
         ensure!(
             !excluded_entry(name, spec, true),
-            "Source explicitement exclue : {name}"
+            "Source explicitly excluded: {name}"
         );
         let mut current = root.try_clone()?;
         for component in Path::new(name).components() {
@@ -217,7 +217,7 @@ pub fn snapshot(root: &Path, spec: &Sources, destination: Option<&Path>) -> Resu
         }
         ensure!(
             !excluded_entry(name, spec, current.metadata()?.is_dir()),
-            "Source explicitement exclue : {name}"
+            "Source explicitly excluded: {name}"
         );
         collector.visit(current, name, 0)?;
     }

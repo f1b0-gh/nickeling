@@ -90,6 +90,10 @@ A plan returns operation IDs under `units.<id>.change`. Set `policy.mode` to
 `"manage"` **before** planning if you intend to apply. An input revision, target,
 artifact, native plan or remote precondition change invalidates that plan.
 `apply` refuses stale operations; it does not substitute an unreviewed plan.
+Removed units also receive saved deletion plans. Planning stops at the first
+pending removed unit in reverse dependency order; after applying that operation,
+plan again for the next unit. Independent removed units are serialized too.
+Applying a live unit's plan never authorizes deletion of another unit.
 `reconcile` with `mode="manage"` authorizes automatic convergence in advance.
 
 ## Instance and composition model
@@ -166,6 +170,10 @@ Status separates Rendered, Applied, Ready, Drifted and Failed. Automatic retries
 use exponential delays and stop after five failures for a revision. Explicit
 `--retry-failed` resets this budget once; new revisions reset it too. SIGINT and
 SIGTERM stop at safe boundaries after the current bounded operation finishes.
+Watch events are coalesced with at least one second between service cycles.
+A failed watch waits for the configured periodic resynchronization; it does not
+trigger immediate recompilation. Quiet watches are polled at most four times a
+second, subject to the existing request timeouts.
 Never force-unlock unknown OpenTofu writers. Investigate stale native locks and
 ownership conflicts before retrying.
 
@@ -194,10 +202,14 @@ Known workload kinds use observed generation and replica status; other supported
 kinds have explicit existence/allocation checks. These checks are not a health
 probe of the application. Deletion is asynchronous when Kubernetes finalizers
 remain. Array observation is conservative about ordering and length.
+Deployment completion requires the desired total, updated, ready and available
+replica counts, including scale-to-zero. A current-generation `Progressing=False`
+condition reports failed readiness without exposing the server's message.
+Ownership remains observable, and a corrected configuration can still be applied.
 
 A bounded watch on one known object per unit supplies scheduling hints. Expired
-watches or transport failures trigger observation; periodic full resynchronization
-covers all remaining objects and missed events. The fixture does not certify
+watches trigger coalesced observation; transport failures wait for periodic full
+resynchronization, which covers remaining objects and missed events. The fixture does not certify
 real API admission, managedFields/defaulting behavior or a particular CNI.
 
 OpenTofu targets require an absolute pinned binary, stable stack name and optional
