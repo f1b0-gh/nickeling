@@ -387,8 +387,12 @@ pub(super) fn create_context(context: &mut Context) -> Result<()> {
     let create = plan(&mut store, &compiled, requests.clone())?;
     assert_eq!(create.payload["phase"], "create-initialize-v1");
     apply(&mut store, &compiled, requests.clone(), &create)?;
-    // Workload controllers can update status between POST and its exact-RV
-    // initializer. A fresh explicit initializer review is permitted, no POST replay.
+    // Workload status may race the initializer. Before a concrete patch was
+    // saved, the same immutable create approval can resume its known UID. A
+    // stale concrete patch instead requires a fresh initializer approval.
+    assert_eq!(requests.lock().unwrap().posts, 1);
+    let known = store.unit(&compiled.instance.id, "app")?.unwrap().inventory;
+    assert!(known.as_object().is_some_and(|entries| !entries.is_empty()));
     for _ in 0..3 {
         let state = store.unit(&compiled.instance.id, "app")?.unwrap();
         if state.inventory.as_object().is_some_and(|entries| {
@@ -399,8 +403,25 @@ pub(super) fn create_context(context: &mut Context) -> Result<()> {
             break;
         }
         let initializer = plan(&mut store, &compiled, requests.clone())?;
-        assert_eq!(initializer.payload["phase"], "initialize-known-v1");
+        if initializer.payload["phase"] == "create-initialize-v1" {
+            assert_eq!(initializer, create, "Only the original approval may resume");
+        } else {
+            assert_eq!(
+                initializer.payload["phase"], "initialize-known-v1",
+                "{:?}",
+                state.failure
+            );
+        }
         apply(&mut store, &compiled, requests.clone(), &initializer)?;
+        assert_eq!(
+            requests.lock().unwrap().posts,
+            1,
+            "Known UID must never be recreated"
+        );
+        let current = store.unit(&compiled.instance.id, "app")?.unwrap().inventory;
+        for (path, entry) in known.as_object().unwrap() {
+            assert_eq!(current[path]["uid"], entry["uid"]);
+        }
     }
     let state = store.unit(&compiled.instance.id, "app")?.unwrap();
     assert!(
