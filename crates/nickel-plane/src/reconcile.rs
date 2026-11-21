@@ -22,6 +22,9 @@ pub struct Options {
     pub execute: bool,
     pub prepare: bool,
     pub retry_failed: bool,
+    pub upgrade_target_bindings: bool,
+    /// Keep retrying at persisted deadlines instead of exhausting the one-shot budget.
+    pub continuous_retry: bool,
     pub approved_operation: Option<String>,
     pub cancelled: Arc<AtomicBool>,
 }
@@ -32,10 +35,18 @@ impl Default for Options {
             execute: true,
             prepare: false,
             retry_failed: false,
+            upgrade_target_bindings: false,
+            continuous_retry: false,
             approved_operation: None,
             cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TargetBinding {
+    pub version: u32,
+    pub identity_sha256: String,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -45,6 +56,8 @@ pub struct UnitState {
     #[serde(default)]
     pub applied_sha256: String,
     pub target_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_binding: Option<TargetBinding>,
     pub rendered: bool,
     pub applied: bool,
     pub readiness: Readiness,
@@ -77,7 +90,7 @@ impl UnitState {
         self.applied = false;
         self.outputs.clear();
         self.attempts = self.attempts.saturating_add(1);
-        self.next_retry = now.saturating_add(2u64.pow(self.attempts.min(8)));
+        self.next_retry = now.saturating_add(2u64.pow(self.attempts.min(9)).min(300));
     }
 }
 fn satisfies(state: &UnitState, revision: &str, gate: Gate) -> bool {
@@ -147,6 +160,59 @@ fn accept_observation(state: &mut UnitState, mut observation: Observation) {
         .then(|| "Workload reports a failed rollout".into());
     state.waiting = None;
 }
+
+struct CheckedTarget {
+    legacy_sha256: String,
+    execution_sha256: String,
+    binding: Option<TargetBinding>,
+}
+impl CheckedTarget {
+    fn record(self, state: &mut UnitState) {
+        if state.target_sha256.is_empty() {
+            state.target_sha256 = self.legacy_sha256;
+        }
+        state.target_binding = self.binding;
+    }
+}
+fn check_target_binding(
+    state: &UnitState,
+    backend: &dyn Backend,
+    upgrade: bool,
+) -> Result<CheckedTarget> {
+    let legacy_sha256 = backend.fingerprint()?;
+    let identity_sha256 = backend.target_identity()?;
+    let binding = if let Some(binding) = &state.target_binding {
+        require(binding.version == 1, "Unsupported target binding version")?;
+        require(
+            binding.identity_sha256 == identity_sha256,
+            "Target identity changed for an owned unit; explicit migration required",
+        )?;
+        Some(binding.clone())
+    } else if state.target_sha256.is_empty() {
+        Some(TargetBinding {
+            version: 1,
+            identity_sha256,
+        })
+    } else {
+        let proof = if upgrade {
+            backend.legacy_fingerprint()?
+        } else {
+            legacy_sha256.clone()
+        };
+        require(state.target_sha256 == proof,
+            "Target changed for a legacy unit; exact historical proof and an explicit binding upgrade are required")?;
+        upgrade.then_some(TargetBinding {
+            version: 1,
+            identity_sha256,
+        })
+    };
+    Ok(CheckedTarget {
+        legacy_sha256,
+        execution_sha256: backend.execution_fingerprint()?,
+        binding,
+    })
+}
+
 pub fn reconcile(
     store: &mut Store,
     compiled: &Compiled,
@@ -182,7 +248,7 @@ pub fn reconcile(
             state.attempts = 0;
             state.next_retry = 0;
         }
-        if state.attempts >= 5 || state.next_retry > options.now {
+        if (!options.continuous_retry && state.attempts >= 5) || state.next_retry > options.now {
             continue;
         }
         let result = (|| -> Result<()> {
@@ -205,12 +271,9 @@ pub fn reconcile(
                 backend.kind() == unit.backend,
                 "Target backend kind does not match unit",
             )?;
-            let target_sha256 = backend.fingerprint()?;
-            if !state.target_sha256.is_empty() && state.target_sha256 != target_sha256 {
-                return Err(Error::Conflict(
-                    "Target changed for an owned unit; explicit migration required".into(),
-                ));
-            }
+            let checked_target =
+                check_target_binding(&state, backend.as_ref(), options.upgrade_target_bindings)?;
+            let target_sha256 = checked_target.execution_sha256.clone();
             if let Some(binding) = backend.state_binding()? {
                 store.claim(&binding, &compiled.instance.id, &id)?;
             }
@@ -230,6 +293,7 @@ pub fn reconcile(
                 provider_lock: effective.provider_lock.clone().map(String::into_bytes),
             };
             let observed = backend.observe(&context)?;
+            checked_target.record(&mut state);
             if let Some(interrupted) = running {
                 state.inventory = observed.inventory.clone();
                 // Persist recovered ownership before closing the recovery journal.
@@ -238,7 +302,6 @@ pub fn reconcile(
                 state.prepared = None;
             }
             let artifact_changed = state.applied_sha256 != artifact_sha256;
-            state.target_sha256 = target_sha256.clone();
             state.artifact_sha256 = artifact_sha256;
             state.rendered = true;
             state.retained = false;
@@ -442,7 +505,7 @@ fn remove_selected(
             state.attempts = 0;
             state.next_retry = 0;
         }
-        if state.attempts >= 5 || state.next_retry > options.now {
+        if (!options.continuous_retry && state.attempts >= 5) || state.next_retry > options.now {
             break;
         }
         let result = (|| -> Result<()> {
@@ -462,10 +525,9 @@ fn remove_selected(
             let backend = backends
                 .get_mut(&unit.target)
                 .ok_or_else(|| Error::Invalid("Missing retained target".into()))?;
-            require(
-                backend.fingerprint()? == state.target_sha256,
-                "Target changed before removal",
-            )?;
+            let checked_target =
+                check_target_binding(&state, backend.as_ref(), options.upgrade_target_bindings)?;
+            let target_sha256 = checked_target.execution_sha256.clone();
             let context = Context {
                 owner: store.owner.clone(),
                 instance: compiled.instance.id.clone(),
@@ -481,6 +543,7 @@ fn remove_selected(
                 provider_lock: artifact.provider_lock.clone().map(String::into_bytes),
             };
             let observed = backend.observe_removal(&context)?;
+            checked_target.record(&mut state);
             state.inventory = observed.inventory.clone();
             store.save_unit(&compiled.instance.id, &id, &state)?;
             if let Some(previous) = &context.interrupted {
@@ -504,7 +567,7 @@ fn remove_selected(
             let change = if let Some(previous) = state.prepared.as_ref().filter(|p| {
                 p.revision == compiled.revision
                     && p.artifact_sha256 == context.artifact_sha256
-                    && p.target_sha256 == state.target_sha256
+                    && p.target_sha256 == target_sha256
                     && p.preconditions == observed.preconditions
             }) {
                 previous.clone()
@@ -519,7 +582,7 @@ fn remove_selected(
                     prepared.operation == token
                         && prepared.revision == context.revision
                         && prepared.artifact_sha256 == context.artifact_sha256
-                        && prepared.target_sha256 == state.target_sha256,
+                        && prepared.target_sha256 == target_sha256,
                     "Backend returned an incorrectly bound removal plan",
                 )?;
                 store.record(&compiled.instance.id, &id, &prepared, "prepared")?;

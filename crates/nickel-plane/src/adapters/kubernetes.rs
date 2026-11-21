@@ -4,8 +4,18 @@ use nickel_util::files;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, os::unix::fs::MetadataExt, time::Duration};
+mod quantity;
 pub trait Api {
     fn request(&mut self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value)>;
+    fn validate_target(&self, _target: &KubernetesTarget) -> Result<()> {
+        Ok(())
+    }
+    fn execution_fingerprint(&self, target: &KubernetesTarget) -> Result<String> {
+        ConnectionSnapshot::read(target)?.fingerprint()
+    }
+    fn legacy_fingerprint(&self, target: &KubernetesTarget) -> Result<String> {
+        ConnectionSnapshot::read(target)?.legacy_fingerprint()
+    }
 }
 pub struct Kubernetes<A: Api> {
     pub api: A,
@@ -13,39 +23,122 @@ pub struct Kubernetes<A: Api> {
 }
 pub struct Http {
     agent: ureq::Agent,
-    server: String,
-    token_file: Option<std::path::PathBuf>,
+    snapshot: ConnectionSnapshot,
+}
+struct ConnectionSnapshot {
+    target: KubernetesTarget,
+    ca: Option<Vec<u8>>,
+    token: Option<String>,
+}
+impl ConnectionSnapshot {
+    fn read(target: &KubernetesTarget) -> Result<Self> {
+        let ca = target
+            .ca_file
+            .as_ref()
+            .map(|path| files::read_limited(path, 1024 * 1024))
+            .transpose()?;
+        let token = target
+            .token_file
+            .as_ref()
+            .map(|path| {
+                let opened = files::open_regular(path)?;
+                require(
+                    opened.metadata()?.mode() & 0o077 == 0,
+                    "Credential file must be private",
+                )?;
+                let token = String::from_utf8(files::read_file(opened, 64 * 1024)?)
+                    .map_err(|_| Error::Invalid("Invalid bearer token encoding".into()))?;
+                require(
+                    !token.trim().is_empty() && !token.trim().contains(['\r', '\n']),
+                    "Invalid bearer token",
+                )?;
+                Ok::<_, Error>(token)
+            })
+            .transpose()?;
+        Ok(Self {
+            target: target.clone(),
+            ca,
+            token,
+        })
+    }
+    fn validate(&self, target: &KubernetesTarget) -> Result<()> {
+        require(
+            self.target == *target,
+            "Kubernetes target changed; reconnect before continuing",
+        )?;
+        let current = Self::read(target)?;
+        require(
+            self.ca == current.ca && self.token == current.token,
+            "Kubernetes trust or credentials changed; reconnect before continuing",
+        )
+    }
+    fn fingerprint(&self) -> Result<String> {
+        let trust = if let Some(ca) = &self.ca {
+            json!({"mode":"explicit","sha256":files::hash(ca)})
+        } else {
+            // These are the same roots ureq's rustls connector uses for WebPki.
+            let anchors: Vec<_> = webpki_roots::TLS_SERVER_ROOTS
+                .iter()
+                .map(|root| {
+                    (
+                        root.subject.as_ref(),
+                        root.subject_public_key_info.as_ref(),
+                        root.name_constraints.as_ref().map(|value| value.as_ref()),
+                    )
+                })
+                .collect();
+            json!({"mode":"webpki","sha256":files::hash(&serde_json::to_vec(&anchors)?)})
+        };
+        Ok(files::hash(&serde_json::to_vec(&json!({
+            "domain":"nickel-plane/kubernetes-execution/v1",
+            "server":self.target.server,"namespace":self.target.namespace,
+            "allowHttpLoopback":self.target.allow_http_loopback,
+            "trust":trust,"token":self.token.as_ref().map(|token| files::hash(token.as_bytes()))
+        }))?))
+    }
+    fn legacy_fingerprint(&self) -> Result<String> {
+        Ok(files::hash(&serde_json::to_vec(&json!({
+            "server":self.target.server,"namespace":self.target.namespace,
+            "ca":self.ca.as_ref().map(|bytes| files::hash(bytes))
+        }))?))
+    }
 }
 impl Api for Http {
+    fn validate_target(&self, target: &KubernetesTarget) -> Result<()> {
+        self.snapshot.validate(target)
+    }
+    fn execution_fingerprint(&self, target: &KubernetesTarget) -> Result<String> {
+        self.snapshot.validate(target)?;
+        self.snapshot.fingerprint()
+    }
+    fn legacy_fingerprint(&self, target: &KubernetesTarget) -> Result<String> {
+        self.snapshot.validate(target)?;
+        self.snapshot.legacy_fingerprint()
+    }
     fn request(&mut self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value)> {
+        self.snapshot.validate(&self.snapshot.target)?;
         require(
             path.starts_with('/') && !path.starts_with("//"),
             "Invalid API path",
         )?;
         let mut request = ureq::http::Request::builder()
             .method(method)
-            .uri(format!("{}{path}", self.server))
+            .uri(format!(
+                "{}{path}",
+                self.snapshot.target.server.trim_end_matches('/')
+            ))
             .header("Accept", "application/json")
             .header(
                 "Content-Type",
-                if method == "PATCH" {
+                if method == "PATCH" && body.is_some_and(Value::is_array) {
+                    "application/json-patch+json"
+                } else if method == "PATCH" {
                     "application/apply-patch+yaml"
                 } else {
                     "application/json"
                 },
             );
-        if let Some(file) = &self.token_file {
-            let opened = files::open_regular(file)?;
-            require(
-                opened.metadata()?.mode() & 0o077 == 0,
-                "Credential file must be private",
-            )?;
-            let token = String::from_utf8(files::read_file(opened, 64 * 1024)?)
-                .map_err(|_| Error::Invalid("Invalid bearer token encoding".into()))?;
-            require(
-                !token.trim().is_empty() && !token.trim().contains(['\r', '\n']),
-                "Invalid bearer token",
-            )?;
+        if let Some(token) = &self.snapshot.token {
             request = request.header("Authorization", format!("Bearer {}", token.trim()));
         }
         let bytes = body
@@ -117,14 +210,14 @@ impl Kubernetes<Http> {
             && matches!(uri.host(), Some("127.0.0.1" | "[::1]"));
         require((uri.scheme_str()==Some("https")||local)&&!target.server.contains(['@','?','#'])&&matches!(uri.path(),""|"/"),"Kubernetes requires an explicit HTTPS server; HTTP is restricted to opted-in loopback fixtures")?;
         validate_name(&target.namespace)?;
+        let snapshot = ConnectionSnapshot::read(&target)?;
         let mut config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .max_redirects(0)
             .proxy(None)
             .timeout_global(Some(Duration::from_secs(30)));
-        if let Some(path) = &target.ca_file {
-            let bytes = files::read_limited(path, 1024 * 1024)?;
-            let cert = ureq::tls::Certificate::from_pem(&bytes)
+        if let Some(bytes) = &snapshot.ca {
+            let cert = ureq::tls::Certificate::from_pem(bytes)
                 .map_err(|_| Error::Invalid("Invalid Kubernetes CA certificate".into()))?;
             config = config.tls_config(
                 ureq::tls::TlsConfig::builder()
@@ -134,8 +227,7 @@ impl Kubernetes<Http> {
         }
         let api = Http {
             agent: config.build().new_agent(),
-            server: target.server.trim_end_matches('/').into(),
-            token_file: target.token_file.clone(),
+            snapshot,
         };
         Ok(Self { api, target })
     }
@@ -150,6 +242,8 @@ struct Entry {
     name: String,
     #[serde(default)]
     missing: bool,
+    #[serde(default)]
+    pending_apply: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -157,6 +251,88 @@ struct Action {
     method: String,
     path: String,
     body: Value,
+}
+const TRANSFER_PHASE: &str = "ownership-transfer";
+
+fn is_transfer(change: &PreparedChange) -> Result<bool> {
+    match change.payload.get("phase") {
+        None => Ok(false), // Historical ordinary apply plans have no phase field.
+        Some(Value::String(phase)) if phase == TRANSFER_PHASE => Ok(true),
+        _ => Err(Error::Invalid("Unknown Kubernetes change phase".into())),
+    }
+}
+
+/// POST and SSA use distinct managed-field identities even with the same manager.
+/// Transfer only an unambiguous existing owner; never reset or acquire fields.
+fn ownership_transfer(object: &Value, manager: &str) -> Result<Option<Value>> {
+    let Some(fields) = object["metadata"].get("managedFields") else {
+        return Ok(None);
+    };
+    let fields = fields
+        .as_array()
+        .ok_or_else(|| Error::Backend("Invalid Kubernetes managed fields".into()))?;
+    let own: Vec<_> = fields
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| {
+            field["manager"] == manager
+                && field["subresource"].as_str().unwrap_or_default().is_empty()
+        })
+        .collect();
+    if !own.iter().any(|(_, field)| field["operation"] == "Update") {
+        return Ok(None);
+    }
+    require(
+        own.len() == 1,
+        "Ambiguous Kubernetes field ownership; explicit managed-fields migration is required",
+    )?;
+    let (index, field) = own[0];
+    require(
+        field["apiVersion"] == object["apiVersion"]
+            && field["fieldsType"] == "FieldsV1"
+            && field["fieldsV1"].is_object(),
+        "Unsupported Kubernetes field ownership; explicit managed-fields migration is required",
+    )?;
+    require(
+        serde_json::to_vec(field)?.len() <= 256 * 1024,
+        "Kubernetes field ownership entry exceeds 256 KiB",
+    )?;
+    Ok(Some(json!([
+        {"op":"test","path":"/metadata/uid","value":text(object,"/metadata/uid")?},
+        {"op":"test","path":"/metadata/resourceVersion","value":text(object,"/metadata/resourceVersion")?},
+        {"op":"test","path":format!("/metadata/managedFields/{index}"),"value":field},
+        {"op":"replace","path":format!("/metadata/managedFields/{index}/operation"),"value":"Apply"}
+    ])))
+}
+
+fn verify_transfer(before: &Value, after: &Value, patch: &Value) -> Result<()> {
+    let mut expected = before.clone();
+    let pointer = text(&patch[3], "/path")?;
+    *expected
+        .pointer_mut(pointer)
+        .ok_or_else(|| Error::Invalid("Invalid ownership transfer path".into()))? = json!("Apply");
+    let normalize = |mut object: Value| -> Result<Value> {
+        let metadata = object["metadata"]
+            .as_object_mut()
+            .ok_or_else(|| Error::Backend("Invalid Kubernetes transfer metadata".into()))?;
+        metadata.remove("resourceVersion");
+        // The API may reorder entries while encoding its internal manager map.
+        let fields = metadata
+            .get_mut("managedFields")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| Error::Backend("Missing Kubernetes transfer ownership".into()))?;
+        let mut sorted: Vec<_> = fields
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<std::result::Result<_, _>>()?;
+        sorted.sort();
+        *fields = sorted.into_iter().map(Value::String).collect();
+        Ok(object)
+    };
+    require(
+        normalize(expected)? == normalize(after.clone())?,
+        "Kubernetes ownership transfer changed unexpected fields",
+    )
 }
 fn validate_name(name: &str) -> Result<()> {
     require(
@@ -287,7 +463,22 @@ fn subset(desired: &Value, actual: &Value) -> bool {
                         .enumerate()
                         .all(|(i, (a, b))| compare(a, b, &format!("{path}/{i}"), kind))
             }),
-            _ => want == have,
+            _ => {
+                if want == have {
+                    return true;
+                }
+                let want = match want {
+                    Value::String(value) => std::borrow::Cow::Borrowed(value.as_str()),
+                    Value::Number(value) => std::borrow::Cow::Owned(value.to_string()),
+                    _ => return false,
+                };
+                let have = match have {
+                    Value::String(value) => std::borrow::Cow::Borrowed(value.as_str()),
+                    Value::Number(value) => std::borrow::Cow::Owned(value.to_string()),
+                    _ => return false,
+                };
+                quantity::equivalent(kind, path, &want, &have)
+            }
         }
     }
     compare(
@@ -367,6 +558,7 @@ fn ready(object: &Value) -> Result<Readiness> {
 }
 impl<A: Api> Kubernetes<A> {
     fn get(&mut self, path: &str) -> Result<Option<Value>> {
+        self.api.validate_target(&self.target)?;
         let (status, value) = self.api.request("GET", path, None)?;
         match status {
             200 => Ok(Some(value)),
@@ -376,6 +568,7 @@ impl<A: Api> Kubernetes<A> {
         }
     }
     fn mutate(&mut self, method: &str, path: &str, body: &Value) -> Result<Value> {
+        self.api.validate_target(&self.target)?;
         let (status, value) = self.api.request(method, path, Some(body))?;
         match status {
             200..=299 => Ok(value),
@@ -414,17 +607,31 @@ impl<A: Api> Backend for Kubernetes<A> {
         BackendKind::Kubernetes
     }
     fn fingerprint(&self) -> Result<String> {
-        let ca = self
-            .target
-            .ca_file
-            .as_ref()
-            .map(|p| files::read_limited(p, 1024 * 1024).map(|b| files::hash(&b)))
-            .transpose()?;
-        Ok(files::hash(&serde_json::to_vec(
-            &json!({"server":self.target.server,"namespace":self.target.namespace,"ca":ca}),
-        )?))
+        self.api.validate_target(&self.target)?;
+        self.api.legacy_fingerprint(&self.target)
+    }
+    fn target_identity(&self) -> Result<String> {
+        self.api.validate_target(&self.target)?;
+        Ok(files::hash(&serde_json::to_vec(&json!({
+            "domain":"nickel-plane/kubernetes-target/v1",
+            "server":self.target.server,"namespace":self.target.namespace
+        }))?))
+    }
+    fn execution_fingerprint(&self) -> Result<String> {
+        self.api.execution_fingerprint(&self.target)
+    }
+    fn legacy_fingerprint(&self) -> Result<String> {
+        self.api.validate_target(&self.target)?;
+        let Some(path) = &self.target.previous_ca_file else {
+            return self.fingerprint();
+        };
+        let ca = files::hash(&files::read_limited(path, 1024 * 1024)?);
+        Ok(files::hash(&serde_json::to_vec(&json!({
+            "server":self.target.server,"namespace":self.target.namespace,"ca":ca
+        }))?))
     }
     fn poll_events(&mut self, value: &Value) -> Result<bool> {
+        self.api.validate_target(&self.target)?;
         // Watch one known object as a scheduling hint, bounded by server timeout.
         // Full periodic observation covers every object and missed/expired events.
         let entries = inventory(value)?;
@@ -455,8 +662,21 @@ impl<A: Api> Backend for Kubernetes<A> {
             .is_some_and(|a| a.iter().any(|e| e["type"] != "BOOKMARK")))
     }
     fn observe(&mut self, context: &Context) -> Result<Observation> {
+        self.api.validate_target(&self.target)?;
         let wanted = desired(context, &self.target.namespace)?;
         let previous = inventory(&context.inventory)?;
+        let interrupted_transfer = context
+            .interrupted
+            .as_ref()
+            .map(is_transfer)
+            .transpose()?
+            .unwrap_or(false);
+        let journal_actions: Vec<Action> = context
+            .interrupted
+            .as_ref()
+            .map(|change| serde_json::from_value(change.payload["actions"].clone()))
+            .transpose()?
+            .unwrap_or_default();
         let mut actual = BTreeMap::new();
         let mut preconditions = BTreeMap::<String, Value>::new();
         let mut outputs = json!({"resources":{}});
@@ -481,6 +701,22 @@ impl<A: Api> Backend for Kubernetes<A> {
         for path in keys {
             if let Some(object) = self.get(&path)? {
                 self.owned(context, &path, &object, &previous)?;
+                let mut pending_apply = previous.get(&path).is_some_and(|e| e.pending_apply);
+                if let Some(change) = &context.interrupted {
+                    if journal_actions.iter().any(|action| {
+                        action.method == "PATCH" && action.path.split('?').next() == Some(&path)
+                    }) {
+                        if interrupted_transfer {
+                            // The journal proves this path was already owned; a
+                            // lost transfer response must not lose the next SSA.
+                            pending_apply = true;
+                        } else if object["metadata"]["annotations"]["nickel-plane.io/operation"]
+                            == change.operation
+                        {
+                            pending_apply = false;
+                        }
+                    }
+                }
                 let entry = Entry {
                     path: path.clone(),
                     uid: text(&object, "/metadata/uid")?.into(),
@@ -488,6 +724,7 @@ impl<A: Api> Backend for Kubernetes<A> {
                     kind: text(&object, "/kind")?.into(),
                     name: text(&object, "/metadata/name")?.into(),
                     missing: false,
+                    pending_apply,
                 };
                 preconditions.insert(
                     path.clone(),
@@ -495,8 +732,11 @@ impl<A: Api> Backend for Kubernetes<A> {
                 );
                 outputs["resources"][&entry.kind][&entry.name] = object.clone();
                 if let Some(want) = wanted.get(&path) {
-                    drifted |= !subset(want, &object);
-                    let r = ready(&object)?;
+                    drifted |= entry.pending_apply || !subset(want, &object);
+                    let mut r = ready(&object)?;
+                    if entry.pending_apply && r != Readiness::Failed {
+                        r = Readiness::NotReady;
+                    }
                     if r != Readiness::Ready && readiness != Readiness::Failed {
                         readiness = r;
                     }
@@ -540,12 +780,65 @@ impl<A: Api> Backend for Kubernetes<A> {
         observed: &Observation,
         operation: &str,
     ) -> Result<PreparedChange> {
+        self.api.validate_target(&self.target)?;
         let wanted = desired(context, &self.target.namespace)?;
         let old = inventory(&context.inventory)?;
         let present = inventory(&observed.inventory)?;
         let mut actions = Vec::new();
         let mut creates = Vec::new();
         let mut summary = ChangeSummary::default();
+        let mut transfer_bytes =
+            serde_json::to_vec(&json!({"phase":TRANSFER_PHASE,"actions":[],"creates":[]}))?.len();
+        for path in wanted.keys() {
+            let Some(entry) = present.get(path).filter(|entry| !entry.missing) else {
+                continue;
+            };
+            let object = self.get(path)?.ok_or_else(|| {
+                Error::Conflict("Kubernetes ownership transfer snapshot is stale".into())
+            })?;
+            self.owned(context, path, &object, &present)?;
+            require(
+                text(&object, "/metadata/uid")? == entry.uid
+                    && text(&object, "/metadata/resourceVersion")? == entry.resource_version,
+                "Kubernetes ownership transfer snapshot is stale",
+            )?;
+            if let Some(body) = ownership_transfer(&object, &manager(context))? {
+                let route = format!("{path}?fieldManager={}", manager(context));
+                let action = Action {
+                    method: "PATCH".into(),
+                    path: route,
+                    body,
+                };
+                // Account for action metadata and separators as well as fieldsets
+                // before retaining another patch in the prepared payload.
+                transfer_bytes = transfer_bytes
+                    .saturating_add(serde_json::to_vec(&action)?.len())
+                    .saturating_add(1);
+                require(
+                    transfer_bytes <= 4 * 1024 * 1024,
+                    "Kubernetes ownership transfer plan exceeds 4 MiB",
+                )?;
+                let result = self.mutate(
+                    "PATCH",
+                    &format!("{}&dryRun=All", action.path),
+                    &action.body,
+                )?;
+                verify_transfer(&object, &result, &action.body)?;
+                actions.push(action);
+            }
+        }
+        if !actions.is_empty() {
+            summary.field_ownership_transfers = actions.len();
+            return Ok(PreparedChange {
+                operation: operation.into(),
+                revision: context.revision.clone(),
+                artifact_sha256: context.artifact_sha256.clone(),
+                target_sha256: self.execution_fingerprint()?,
+                summary,
+                payload: json!({"phase":TRANSFER_PHASE,"actions":actions,"creates":[]}),
+                preconditions: observed.preconditions.clone(),
+            });
+        }
         for (path, body) in &wanted {
             let mut body = body.clone();
             body["metadata"]["annotations"]["nickel-plane.io/operation"] = json!(operation);
@@ -584,7 +877,7 @@ impl<A: Api> Backend for Kubernetes<A> {
             operation: operation.into(),
             revision: context.revision.clone(),
             artifact_sha256: context.artifact_sha256.clone(),
-            target_sha256: self.fingerprint()?,
+            target_sha256: self.execution_fingerprint()?,
             summary,
             payload: json!({"actions":actions,"creates":creates}),
             preconditions: observed.preconditions.clone(),
@@ -595,10 +888,11 @@ impl<A: Api> Backend for Kubernetes<A> {
         context: &Context,
         change: &PreparedChange,
     ) -> Result<Observation> {
+        let transfer = is_transfer(change)?;
         require(
             change.revision == context.revision
                 && change.artifact_sha256 == context.artifact_sha256
-                && change.target_sha256 == self.fingerprint()?,
+                && change.target_sha256 == self.execution_fingerprint()?,
             "Stale Kubernetes change",
         )?;
         let observed = self.observe(context)?;
@@ -609,7 +903,22 @@ impl<A: Api> Backend for Kubernetes<A> {
         let actions: Vec<Action> = serde_json::from_value(change.payload["actions"].clone())?;
         let mut updated = inventory(&observed.inventory)?;
         for action in actions {
+            let before = if transfer {
+                let path = action
+                    .path
+                    .split('?')
+                    .next()
+                    .ok_or_else(|| Error::Invalid("Invalid transfer action path".into()))?;
+                Some(self.get(path)?.ok_or_else(|| {
+                    Error::Conflict("Kubernetes transfer object disappeared".into())
+                })?)
+            } else {
+                None
+            };
             let result = self.mutate(&action.method, &action.path, &action.body)?;
+            if let Some(before) = before {
+                verify_transfer(&before, &result, &action.body)?;
+            }
             if action.method == "DELETE" {
                 if self.get(&action.path)?.is_none() {
                     updated.remove(&action.path);
@@ -636,6 +945,7 @@ impl<A: Api> Backend for Kubernetes<A> {
                     kind: text(&result, "/kind")?.into(),
                     name: name.into(),
                     missing: false,
+                    pending_apply: transfer,
                 },
             );
         }

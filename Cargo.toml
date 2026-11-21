@@ -1,3 +1,6 @@
 [workspace]
 members = ["crates/nickel-util", "crates/nickel-k8s", "crates/nickel-tf", "crates/nickel-plane"]
 resolver = "2"
+
+[workspace.dependencies]
+webpki-roots = "=1.0.11"

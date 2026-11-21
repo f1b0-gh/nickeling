@@ -556,6 +556,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "ureq",
+ "webpki-roots",
 ]
 
 [[package]]

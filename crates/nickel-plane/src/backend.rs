@@ -41,10 +41,20 @@ pub struct ChangeSummary {
     pub updates: usize,
     pub deletes: usize,
     pub replacements: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub field_ownership_transfers: usize,
+}
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 impl ChangeSummary {
     pub fn changed(&self) -> bool {
-        self.creates + self.updates + self.deletes + self.replacements > 0
+        self.creates
+            + self.updates
+            + self.deletes
+            + self.replacements
+            + self.field_ownership_transfers
+            > 0
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -77,6 +87,18 @@ pub trait Backend {
     fn kind(&self) -> BackendKind;
     /// Fingerprint the target and state binding, excluding credential values.
     fn fingerprint(&self) -> Result<String>;
+    /// Stable target identity, independent of Kubernetes trust and authentication.
+    fn target_identity(&self) -> Result<String> {
+        self.fingerprint()
+    }
+    /// Bind a prepared operation to the connection configuration actually in use.
+    fn execution_fingerprint(&self) -> Result<String> {
+        self.fingerprint()
+    }
+    /// Historical proof used only during an explicitly requested binding upgrade.
+    fn legacy_fingerprint(&self) -> Result<String> {
+        self.fingerprint()
+    }
     /// A bounded event hint. Errors trigger periodic resynchronization, never mutation.
     fn poll_events(&mut self, _inventory: &Value) -> Result<bool> {
         Ok(false)

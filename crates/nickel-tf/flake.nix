@@ -11,7 +11,7 @@
       opentofu-local = pkgs.opentofu.withPlugins (p: [ p.hashicorp_random ]);
     };
     devShells.${system}.default = pkgs.mkShell {
-      packages = [ pkgs.nickel pkgs.opentofu pkgs.rustc pkgs.cargo pkgs.clippy pkgs.rustfmt pkgs.bubblewrap pkgs.util-linux ];
+      packages = [ pkgs.nickel pkgs.opentofu pkgs.rustc pkgs.cargo pkgs.clippy pkgs.rustfmt pkgs.bubblewrap pkgs.util-linux pkgs.openssl ];
     };
   };
 }

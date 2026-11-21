@@ -158,6 +158,12 @@ See the [test commands](docs/development.md), [documentation](docs/README.md)
 and [development rules](AGENTS.md). Tests use fixtures and pinned engines;
 they do not qualify a live cluster or Proxmox infrastructure.
 
+For real Kubernetes API behavior, run `python3 scripts/test-kind.py` with a local
+Docker daemon. The [kind testing guide](docs/kubernetes-testing.md) covers the
+same disposable cluster driver used in CI, including pinned tools and cleanup.
+This checks local API semantics; k3s, production operation and Scaleway need
+separate qualification.
+
 ## Project status
 
 Nickeling is under development at `0.1.0`. GitHub is the current publication target.

@@ -25,6 +25,9 @@ struct World {
     sensitive: bool,
     missing: bool,
     fail: bool,
+    fail_observe: bool,
+    fail_after_write: bool,
+    observations: Vec<String>,
     fail_after_delete: bool,
     ready: bool,
     readiness: Option<Readiness>,
@@ -42,7 +45,11 @@ impl Backend for Fake {
         Ok(format!("{:?}", self.kind))
     }
     fn observe(&mut self, c: &Context) -> Result<Observation> {
-        let w = self.world.lock().unwrap();
+        let mut w = self.world.lock().unwrap();
+        w.observations.push(c.unit_id.clone());
+        if w.fail_observe {
+            return Err(Error::Backend("observation unavailable".into()));
+        }
         let value = w.values.get(&c.unit_id);
         Ok(Observation {
             exists: value.is_some(),
@@ -90,6 +97,9 @@ impl Backend for Fake {
         }
         w.writes.push(c.unit_id.clone());
         w.values.insert(c.unit_id.clone(), c.artifact.clone());
+        if w.fail_after_write {
+            return Err(Error::Backend("interrupted mutation response".into()));
+        }
         if let Some(cancel) = &w.cancel {
             cancel.store(true, Ordering::SeqCst)
         }
@@ -298,6 +308,157 @@ fn retained_units_are_never_deleted_and_retry_is_bounded() -> Result<()> {
 }
 
 #[test]
+fn continuous_retry_survives_long_outages_and_restart_for_apply_and_removal() -> Result<()> {
+    for removal in [false, true] {
+        let (tmp, mut s, c, w, mut r) = fixture()?;
+        s.submit(&c)?;
+        if removal {
+            reconcile(&mut s, &c, &Validate, &mut r, &Options::default())?;
+            s.mark_removed("mixed", true)?;
+        }
+        let unit = if removal { "a-app" } else { "z-infra" };
+        w.lock().unwrap().fail_observe = true;
+        w.lock().unwrap().observations.clear();
+        let mut options = Options {
+            continuous_retry: true,
+            ..Default::default()
+        };
+        for (index, (now, deadline)) in [
+            (1, 3),
+            (3, 7),
+            (7, 15),
+            (15, 31),
+            (31, 63),
+            (63, 127),
+            (127, 255),
+            (255, 511),
+            (511, 811),
+            (811, 1111),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            options.now = now;
+            reconcile(&mut s, &c, &Validate, &mut r, &options)?;
+            let state = s.unit("mixed", unit)?.unwrap();
+            assert_eq!(state.attempts, index as u32 + 1);
+            assert_eq!(state.next_retry, deadline);
+            assert_eq!(w.lock().unwrap().observations.len(), index + 1);
+            options.now = deadline - 1;
+            reconcile(&mut s, &c, &Validate, &mut r, &options)?;
+            assert_eq!(w.lock().unwrap().observations.len(), index + 1);
+            assert!(w.lock().unwrap().deletes.is_empty());
+        }
+        drop(s);
+        let mut s = Store::open(&tmp.path().join("store"))?;
+        assert_eq!(s.unit("mixed", unit)?.unwrap().attempts, 10);
+        assert_eq!(s.unit("mixed", unit)?.unwrap().next_retry, 1111);
+        w.lock().unwrap().fail_observe = false;
+        options.now = 1110;
+        reconcile(&mut s, &c, &Validate, &mut r, &options)?;
+        assert_eq!(w.lock().unwrap().observations.len(), 10);
+        options.now = 1111;
+        reconcile(&mut s, &c, &Validate, &mut r, &options)?;
+        let state = s.unit("mixed", unit)?.unwrap();
+        assert_eq!(state.attempts, 0);
+        assert_eq!(state.next_retry, 0);
+        assert!(state.failure.is_none());
+        if removal {
+            assert!(state.deleted);
+            assert_eq!(w.lock().unwrap().deletes, vec!["a-app", "z-infra"]);
+        } else {
+            assert!(state.applied);
+            assert_eq!(w.lock().unwrap().writes, vec!["z-infra", "a-app"]);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn one_shot_removal_still_stops_after_five_failures() -> Result<()> {
+    let (_tmp, mut s, c, w, mut r) = fixture()?;
+    s.submit(&c)?;
+    reconcile(&mut s, &c, &Validate, &mut r, &Options::default())?;
+    s.mark_removed("mixed", true)?;
+    w.lock().unwrap().fail_observe = true;
+    w.lock().unwrap().observations.clear();
+    for now in [1, 3, 7, 15, 31, 1000] {
+        reconcile(
+            &mut s,
+            &c,
+            &Validate,
+            &mut r,
+            &Options {
+                now,
+                ..Default::default()
+            },
+        )?;
+    }
+    assert_eq!(s.unit("mixed", "a-app")?.unwrap().attempts, 5);
+    assert_eq!(w.lock().unwrap().observations.len(), 5);
+    assert!(w.lock().unwrap().deletes.is_empty());
+    Ok(())
+}
+
+#[test]
+fn continuous_retry_recovers_a_running_operation_after_a_persisted_outage() -> Result<()> {
+    let (tmp, mut s, c, w, mut r) = fixture()?;
+    s.submit(&c)?;
+    w.lock().unwrap().fail_after_write = true;
+    let mut options = Options {
+        continuous_retry: true,
+        ..Default::default()
+    };
+    reconcile(&mut s, &c, &Validate, &mut r, &options)?;
+    let operation = s.running("mixed", "z-infra")?.unwrap().operation;
+    w.lock().unwrap().fail_observe = true;
+    for now in [3, 7, 15, 31, 63] {
+        options.now = now;
+        reconcile(&mut s, &c, &Validate, &mut r, &options)?;
+    }
+    assert_eq!(s.unit("mixed", "z-infra")?.unwrap().attempts, 6);
+    assert_eq!(s.running("mixed", "z-infra")?.unwrap().operation, operation);
+    drop(s);
+    let mut s = Store::open(&tmp.path().join("store"))?;
+    w.lock().unwrap().fail_observe = false;
+    w.lock().unwrap().fail_after_write = false;
+    options.now = 126;
+    reconcile(&mut s, &c, &Validate, &mut r, &options)?;
+    assert!(s.running("mixed", "z-infra")?.is_some());
+    options.now = 127;
+    reconcile(&mut s, &c, &Validate, &mut r, &options)?;
+    assert!(s.running("mixed", "z-infra")?.is_none());
+    assert!(s.unit("mixed", "z-infra")?.unwrap().applied);
+    assert_eq!(w.lock().unwrap().writes, vec!["z-infra", "a-app"]);
+    Ok(())
+}
+
+#[test]
+fn continuous_retry_saturates_counters_and_deadlines() -> Result<()> {
+    let (_tmp, mut s, c, w, mut r) = fixture()?;
+    s.submit(&c)?;
+    w.lock().unwrap().fail_observe = true;
+    let mut options = Options {
+        continuous_retry: true,
+        ..Default::default()
+    };
+    reconcile(&mut s, &c, &Validate, &mut r, &options)?;
+    let mut state = s.unit("mixed", "z-infra")?.unwrap();
+    state.attempts = u32::MAX;
+    state.next_retry = 100;
+    s.save_unit("mixed", "z-infra", &state)?;
+    options.now = 100;
+    reconcile(&mut s, &c, &Validate, &mut r, &options)?;
+    let state = s.unit("mixed", "z-infra")?.unwrap();
+    assert_eq!(state.attempts, u32::MAX);
+    assert_eq!(state.next_retry, 400);
+    options.now = u64::MAX - 1;
+    reconcile(&mut s, &c, &Validate, &mut r, &options)?;
+    assert_eq!(s.unit("mixed", "z-infra")?.unwrap().next_retry, u64::MAX);
+    Ok(())
+}
+
+#[test]
 fn planning_removed_units_does_not_execute_deletion() -> Result<()> {
     let (_tmp, mut s, mut c, w, mut r) = fixture()?;
     s.submit(&c)?;
@@ -496,16 +657,21 @@ fn stale_removal_approval_never_substitutes_a_fresh_plan() -> Result<()> {
         .unwrap()
         .values
         .insert("a-app".into(), json!({"message":"changed remotely"}));
-    reconcile(
-        &mut s,
-        &c,
-        &Validate,
-        &mut r,
-        &Options {
-            approved_operation: Some(operation),
-            ..Default::default()
-        },
-    )?;
+    for now in [1, 3, 7, 15, 31, 63] {
+        reconcile(
+            &mut s,
+            &c,
+            &Validate,
+            &mut r,
+            &Options {
+                now,
+                continuous_retry: true,
+                approved_operation: Some(operation.clone()),
+                ..Default::default()
+            },
+        )?;
+    }
+    assert_eq!(s.unit("mixed", "a-app")?.unwrap().attempts, 6);
     assert!(s
         .unit("mixed", "a-app")?
         .unwrap()

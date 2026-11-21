@@ -65,6 +65,9 @@ struct Runtime {
     store: PathBuf,
     #[arg(long)]
     retry_failed: bool,
+    /// Record stable target identities only after verifying their legacy fingerprints.
+    #[arg(long)]
+    upgrade_target_bindings: bool,
 }
 #[derive(Subcommand)]
 enum Command {
@@ -245,6 +248,8 @@ fn run_runtime(
             prepare,
             approved_operation: approved.clone(),
             retry_failed: runtime.retry_failed && first,
+            upgrade_target_bindings: runtime.upgrade_target_bindings,
+            continuous_retry: interval.is_some(),
             cancelled: flag.clone(),
         };
         match reconcile::reconcile(&mut store, &compiled, &validator, &mut registry, &options) {
