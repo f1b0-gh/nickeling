@@ -3,4 +3,4 @@ members = ["crates/nickel-util", "crates/nickel-k8s", "crates/nickel-tf", "crate
 resolver = "2"
 
 [workspace.dependencies]
-webpki-roots = "=1.0.11"
+webpki-roots = "=1.0.12"
